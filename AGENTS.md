@@ -127,3 +127,17 @@ Before changing code:
 During development, preserve existing project state and security constraints. Keep changes scoped; use safe synthetic tests by default. **Do not commit, push, tag, release, deploy or run real external effects unless separately instructed.**
 
 **Guiding rule: Build the Hackathon application; reuse the pinned Agentic Intent Gate Runtime.**
+
+## Graph Hacks — Project-Specific Instructions
+
+Project: incidentgraph-agent
+Track: Agents That Act on Connected Data
+
+- FalkorDB must implement core graph functionality.
+- Build incident investigation, dependency traversal,
+  and impact analysis.
+- Reuse agentic-intent-gate v0.2.0 for approved
+  side-effect execution.
+- Do not rebuild the shared Agent Runtime.
+- Keep the architecture minimal and demo-ready.
+- Follow official competition development dates.
