@@ -4,11 +4,49 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from incidentgraph_agent.database import FalkorStore
-from incidentgraph_agent.errors import NotFound
+from incidentgraph_agent.errors import IncompleteGraphEvidence, NotFound
 from incidentgraph_agent.validation import validate_identifier, validate_max_depth
 
 _RESULT_LIMIT = 500
+_RESULT_FETCH_LIMIT = _RESULT_LIMIT + 1
 _CORRELATION_WINDOW = timedelta(hours=24)
+
+
+def _ensure_complete_rows(rows: list[Any], *, evidence_kind: str) -> None:
+    if len(rows) > _RESULT_LIMIT:
+        raise IncompleteGraphEvidence(
+            f"{evidence_kind} exceeded the {_RESULT_LIMIT}-row safety limit; "
+            "no partial evidence was returned."
+        )
+
+
+def _validated_path(
+    value: Any,
+    depth_value: Any,
+    *,
+    max_depth: int,
+    start_id: str,
+    end_id: str | None = None,
+) -> tuple[int, tuple[str, ...]]:
+    path = _path_tuple(value)
+    if type(depth_value) is not int:
+        raise IncompleteGraphEvidence(
+            "FalkorDB returned path evidence that could not be validated; "
+            "no partial evidence was returned."
+        )
+    depth = depth_value
+    if (
+        path is None
+        or path[0] != start_id
+        or (end_id is not None and path[-1] != end_id)
+        or depth != len(path) - 1
+        or not 1 <= depth <= max_depth
+    ):
+        raise IncompleteGraphEvidence(
+            "FalkorDB returned path evidence that could not be validated; "
+            "no partial evidence was returned."
+        )
+    return depth, path
 
 _SERVICE_LOOKUP = """
     MATCH (s:Service {id: $service_id})
@@ -18,21 +56,18 @@ _SERVICE_LOOKUP = """
 _DEPENDENCY_PATHS = """
     MATCH p=(source:Service {id: $service_id})-[:DEPENDS_ON*1..4]->(target:Service)
     WHERE length(p) <= $max_depth
+      AND all(node IN nodes(p) WHERE single(candidate IN nodes(p) WHERE candidate.id = node.id))
     RETURN [n IN nodes(p) | n.id] AS path_ids, length(p) AS depth
     LIMIT $limit
 """
 _BLAST_RADIUS_PATHS = """
     MATCH p=(dependent:Service)-[:DEPENDS_ON*1..4]->(failed:Service {id: $service_id})
     WHERE length(p) <= $max_depth AND dependent.id <> failed.id
+      AND all(node IN nodes(p) WHERE single(candidate IN nodes(p) WHERE candidate.id = node.id))
     RETURN dependent.id AS service_id,
            [n IN nodes(p) | n.id] AS path_ids,
            length(p) AS depth
     LIMIT $limit
-"""
-_BLAST_RADIUS_COUNT = """
-    MATCH p=(dependent:Service)-[:DEPENDS_ON*1..4]->(failed:Service {id: $service_id})
-    WHERE length(p) <= $max_depth AND dependent.id <> failed.id
-    RETURN count(DISTINCT dependent.id) AS total
 """
 _INCIDENT_LOOKUP = """
     MATCH (i:Incident {id: $incident_id})
@@ -78,7 +113,9 @@ def _timestamp(value: str) -> datetime:
 def _path_tuple(value: Any) -> tuple[str, ...] | None:
     if not isinstance(value, (list, tuple)):
         return None
-    path = tuple(str(item) for item in value)
+    if any(not isinstance(item, str) or not item for item in value):
+        return None
+    path = tuple(value)
     if len(path) < 2 or len(set(path)) != len(path):
         return None
     return path
@@ -94,17 +131,25 @@ class IncidentRepository:
         self._require_service(service_id)
         rows = self.store.read(
             _DEPENDENCY_PATHS,
-            {"service_id": service_id, "max_depth": max_depth, "limit": _RESULT_LIMIT},
+            {
+                "service_id": service_id,
+                "max_depth": max_depth,
+                "limit": _RESULT_FETCH_LIMIT,
+            },
         ).result_set
+        _ensure_complete_rows(rows, evidence_kind="Dependency paths")
 
         paths: set[tuple[int, tuple[str, ...]]] = set()
         for row in rows:
-            path = _path_tuple(row[0])
-            depth = int(row[1])
-            if path is None or path[0] != service_id or depth != len(path) - 1:
-                continue
-            if depth <= max_depth:
-                paths.add((depth, path))
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned path evidence that could not be validated; "
+                    "no partial evidence was returned."
+                )
+            depth, path = _validated_path(
+                row[0], row[1], max_depth=max_depth, start_id=service_id
+            )
+            paths.add((depth, path))
         ordered = sorted(paths, key=lambda item: (item[0], item[1]))
         return {
             "service_id": service_id,
@@ -117,7 +162,8 @@ class IncidentRepository:
                 {"service_ids": list(path), "relationship": "DEPENDS_ON", "depth": depth}
                 for depth, path in ordered
             ],
-            "truncated": len(rows) >= _RESULT_LIMIT,
+            "truncated": False,
+            "evidence_complete": True,
         }
 
     def blast_radius(
@@ -131,25 +177,31 @@ class IncidentRepository:
         params = {
             "service_id": failed_service_id,
             "max_depth": max_depth,
-            "limit": _RESULT_LIMIT,
+            "limit": _RESULT_FETCH_LIMIT,
         }
-        count_rows = self.store.read(_BLAST_RADIUS_COUNT, params).result_set
-        total = int(count_rows[0][0]) if count_rows else 0
         rows = self.store.read(_BLAST_RADIUS_PATHS, params).result_set
+        _ensure_complete_rows(rows, evidence_kind="Blast-radius paths")
 
         paths_by_service: dict[str, set[tuple[int, tuple[str, ...]]]] = {}
         for row in rows:
-            service_id = str(row[0])
-            path = _path_tuple(row[1])
-            depth = int(row[2])
-            if (
-                path is None
-                or path[0] != service_id
-                or path[-1] != failed_service_id
-                or depth != len(path) - 1
-                or depth > max_depth
-            ):
-                continue
+            if not isinstance(row, (list, tuple)) or len(row) < 3:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned path evidence that could not be validated; "
+                    "no partial evidence was returned."
+                )
+            if not isinstance(row[0], str) or not row[0]:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned path evidence that could not be validated; "
+                    "no partial evidence was returned."
+                )
+            service_id = row[0]
+            depth, path = _validated_path(
+                row[1],
+                row[2],
+                max_depth=max_depth,
+                start_id=service_id,
+                end_id=failed_service_id,
+            )
             paths_by_service.setdefault(service_id, set()).add((depth, path))
 
         affected: list[dict[str, Any]] = []
@@ -177,8 +229,9 @@ class IncidentRepository:
             ),
             "max_depth": max_depth,
             "affected_services": affected,
-            "total_distinct_affected_services": total,
-            "paths_truncated": len(rows) >= _RESULT_LIMIT,
+            "total_distinct_affected_services": len(paths_by_service),
+            "paths_truncated": False,
+            "evidence_complete": True,
         }
 
     def correlate(
@@ -223,12 +276,14 @@ class IncidentRepository:
 
         deployments = self.store.read(
             _DEPLOYMENTS_FOR_SERVICES,
-            {"service_ids": service_ids, "limit": _RESULT_LIMIT},
+            {"service_ids": service_ids, "limit": _RESULT_FETCH_LIMIT},
         ).result_set if service_ids else []
         alerts = self.store.read(
             _ALERTS_FOR_SERVICES,
-            {"service_ids": service_ids, "limit": _RESULT_LIMIT},
+            {"service_ids": service_ids, "limit": _RESULT_FETCH_LIMIT},
         ).result_set if service_ids else []
+        _ensure_complete_rows(deployments, evidence_kind="Deployment evidence")
+        _ensure_complete_rows(alerts, evidence_kind="Alert evidence")
 
         deployment_evidence = [
             {
@@ -311,21 +366,34 @@ class IncidentRepository:
                 "The synthetic graph contains no logs, traces, or metric time series.",
                 "Deployment and alert timing alone cannot establish root cause.",
             ],
-            "evidence_truncated": (
-                len(deployments) >= _RESULT_LIMIT or len(alerts) >= _RESULT_LIMIT
-            ),
+            "evidence_truncated": False,
+            "evidence_complete": True,
         }
 
     def investigate(self, incident_id: str, *, max_depth: int = 4) -> dict[str, Any]:
         incident_id = validate_identifier(incident_id, field="incident_id")
         max_depth = validate_max_depth(max_depth)
         correlation = self.correlate(incident_id=incident_id)
+        if correlation.get("evidence_complete") is not True or correlation.get(
+            "evidence_truncated", True
+        ):
+            raise IncompleteGraphEvidence(
+                "Incident correlation evidence is incomplete; no investigation "
+                "result was returned."
+            )
         involved = set(correlation["target"]["involved_service_ids"])
         paths_by_service: dict[str, set[tuple[str, tuple[str, ...], int]]] = {}
         paths_truncated = False
 
         for source_service in sorted(involved):
             radius = self.blast_radius(source_service, max_depth=max_depth)
+            if radius.get("evidence_complete") is not True or radius.get(
+                "paths_truncated", True
+            ):
+                raise IncompleteGraphEvidence(
+                    "Incident path evidence is incomplete; no investigation result "
+                    "was returned."
+                )
             paths_truncated = paths_truncated or radius["paths_truncated"]
             for affected in radius["affected_services"]:
                 target_service = affected["service_id"]
@@ -375,6 +443,7 @@ class IncidentRepository:
             "causality": correlation["causality"],
             "uncertainty": correlation["uncertainty"],
             "paths_truncated": paths_truncated,
+            "evidence_complete": not paths_truncated,
         }
 
     def _require_service(self, service_id: str) -> dict[str, str]:

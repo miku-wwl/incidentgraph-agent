@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import socket
 
+import pytest
+
 from incidentgraph_agent.cli import main
-from incidentgraph_agent.errors import InvalidInput, NotFound
+from incidentgraph_agent.errors import IncompleteGraphEvidence, InvalidInput, NotFound
 from incidentgraph_agent.repository import IncidentRepository
 from incidentgraph_agent.seed import seed_dataset
 
@@ -25,6 +27,75 @@ def _counts(store) -> tuple[dict[str, int], int]:
         store.read("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
     )
     return nodes, relationships
+
+
+def _write_path_fanout(
+    store,
+    prefix: str,
+    *,
+    branch_count: int,
+    leaves_per_branch: int,
+    reverse: bool = False,
+    incident: bool = False,
+) -> tuple[str, str | None]:
+    root_id = f"{prefix}-root"
+    branch_ids = [f"{prefix}-branch-{index:02d}" for index in range(branch_count)]
+    if reverse:
+        root_to_branch = "MERGE (branch)-[:DEPENDS_ON]->(root)"
+        branch_to_leaf = "MERGE (leaf)-[:DEPENDS_ON]->(branch)"
+    else:
+        root_to_branch = "MERGE (root)-[:DEPENDS_ON]->(branch)"
+        branch_to_leaf = "MERGE (branch)-[:DEPENDS_ON]->(leaf)"
+
+    store.write(
+        f"""
+        MERGE (root:Service {{id: $root_id}})
+        SET root.name = root.id, root.environment = 'test', root.criticality = 'low'
+        WITH root
+        UNWIND $branch_ids AS branch_id
+        MERGE (branch:Service {{id: branch_id}})
+        SET branch.name = branch.id,
+            branch.environment = 'test',
+            branch.criticality = 'low'
+        {root_to_branch}
+        """,
+        {"root_id": root_id, "branch_ids": branch_ids},
+    )
+    rows = [
+        {
+            "branch_id": branch_id,
+            "leaf_id": f"{prefix}-leaf-{branch_index:02d}-{leaf_index:03d}",
+        }
+        for branch_index, branch_id in enumerate(branch_ids)
+        for leaf_index in range(leaves_per_branch)
+    ]
+    store.write(
+        f"""
+        UNWIND $rows AS row
+        MATCH (branch:Service {{id: row.branch_id}})
+        MERGE (leaf:Service {{id: row.leaf_id}})
+        SET leaf.name = leaf.id, leaf.environment = 'test', leaf.criticality = 'low'
+        {branch_to_leaf}
+        """,
+        {"rows": rows},
+    )
+
+    incident_id = None
+    if incident:
+        incident_id = f"{prefix}-incident"
+        store.write(
+            """
+            MERGE (incident:Incident {id: $incident_id})
+            SET incident.started_at = '2026-10-15T09:00:00+13:00',
+                incident.status = 'investigating',
+                incident.summary = 'Synthetic path overflow test.'
+            WITH incident
+            MATCH (root:Service {id: $root_id})
+            MERGE (incident)-[:INVOLVES]->(root)
+            """,
+            {"incident_id": incident_id, "root_id": root_id},
+        )
+    return root_id, incident_id
 
 
 def test_real_falkordb_module_and_graph_query(store):
@@ -241,6 +312,60 @@ def test_cycles_are_bounded_and_repeated_nodes_are_removed(store):
         }
     ]
     assert all(item["depth"] <= 4 for item in result["paths"])
+
+
+def test_exactly_500_paths_are_complete_and_deterministically_ordered(store):
+    service_id, _ = _write_path_fanout(
+        store,
+        "limit-500",
+        branch_count=20,
+        leaves_per_branch=24,
+    )
+    repository = IncidentRepository(store)
+
+    first = repository.dependencies(service_id)
+    second = repository.dependencies(service_id)
+
+    assert len(first["paths"]) == 500
+    assert first["paths"] == second["paths"]
+    assert first["evidence_complete"] is True
+    assert first["truncated"] is False
+    assert [item["depth"] for item in first["paths"]] == sorted(
+        item["depth"] for item in first["paths"]
+    )
+
+
+def test_501_dependency_paths_fail_closed_without_partial_evidence(store):
+    service_id, _ = _write_path_fanout(
+        store,
+        "limit-501",
+        branch_count=3,
+        leaves_per_branch=166,
+    )
+
+    with pytest.raises(IncompleteGraphEvidence) as error:
+        IncidentRepository(store).dependencies(service_id)
+
+    assert error.value.code == "incomplete_graph_evidence"
+    assert "no partial evidence was returned" in str(error.value)
+
+
+def test_blast_radius_and_investigation_fail_closed_above_path_limit(store):
+    failed_service_id, incident_id = _write_path_fanout(
+        store,
+        "radius-501",
+        branch_count=3,
+        leaves_per_branch=166,
+        reverse=True,
+        incident=True,
+    )
+    assert incident_id is not None
+    repository = IncidentRepository(store)
+
+    with pytest.raises(IncompleteGraphEvidence):
+        repository.blast_radius(failed_service_id)
+    with pytest.raises(IncompleteGraphEvidence):
+        repository.investigate(incident_id)
 
 
 def test_graph_ablation_returns_error_without_invented_evidence(

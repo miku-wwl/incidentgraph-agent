@@ -20,5 +20,11 @@ class GraphQueryError(IncidentGraphError):
     code = "graph_query_failed"
 
 
+class IncompleteGraphEvidence(IncidentGraphError):
+    """A bounded graph query could not prove that its evidence is complete."""
+
+    code = "incomplete_graph_evidence"
+
+
 class ConfigurationError(IncidentGraphError):
     code = "configuration_error"
