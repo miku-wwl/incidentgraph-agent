@@ -23,7 +23,7 @@ Codex assisted with implementation and documentation. The project owner is respo
 
 ## Architecture and technology
 
-Python 3.13 CLI → small repository/query layer → FalkorDB Python client → local FalkorDB 6.0.2. Graph reads use predefined parameterized Cypher; no model or user input can provide Cypher. Dependency traversal is bounded to four hops, and path/evidence results are capped at 500 per query. The runtime dependency is pinned in `pyproject.toml` and `uv.lock` to commit `7261fdd2f47d2b15fabe8faac527eeee37338eb1` (`agentic-intent-gate==0.2.0`). This phase verifies and installs the runtime but does not compose or execute Runtime Actions.
+Python 3.13 CLI → small repository/query layer → FalkorDB Python client → local FalkorDB 6.0.2. Graph reads use predefined parameterized Cypher; no model or user input can provide Cypher. Dependency traversal is bounded to four hops. Path and evidence queries fetch up to 501 rows as a sentinel and return at most 500 rows only when completeness is established. Before and after each graph read, the application verifies that FalkorDB's runtime-mutable `RESULTSET_SIZE` is unlimited or at least 501. The runtime dependency is pinned in `pyproject.toml` and `uv.lock` to commit `7261fdd2f47d2b15fabe8faac527eeee37338eb1` (`agentic-intent-gate==0.2.0`). This phase verifies and installs the runtime but does not compose or execute Runtime Actions.
 
 ### Graph model
 
@@ -79,28 +79,26 @@ Compose uses `falkordb/falkordb-server@sha256:8e4fe29e6646890a9deaf2f009ad2bc5e5
 ```cypher
 MATCH p=(source:Service {id: $service_id})-[:DEPENDS_ON*1..4]->(target:Service)
 WHERE length(p) <= $max_depth
+  AND all(node IN nodes(p) WHERE single(candidate IN nodes(p) WHERE id(candidate) = id(node)))
 RETURN [n IN nodes(p) | n.id] AS path_ids, length(p) AS depth
 LIMIT $limit
 ```
 
-Blast radius traverses the incoming dependency direction, from affected service to failed service, and computes a distinct affected count:
+Blast radius traverses the incoming dependency direction, from affected service to failed service:
 
 ```cypher
 MATCH p=(dependent:Service)-[:DEPENDS_ON*1..4]->(failed:Service {id: $service_id})
 WHERE length(p) <= $max_depth AND dependent.id <> failed.id
+  AND all(node IN nodes(p) WHERE single(candidate IN nodes(p) WHERE id(candidate) = id(node)))
 RETURN dependent.id AS service_id,
        [n IN nodes(p) | n.id] AS path_ids,
        length(p) AS depth
 LIMIT $limit
 ```
 
-The distinct blast-radius count uses the same bounded path filter:
+The repository binds `$limit` to 501 for path, deployment, and alert queries. It accepts a result only when at most 500 rows are returned, validates each required field, and sorts paths deterministically. A 501st row proves the evidence exceeds the supported result cap; the application raises `incomplete_graph_evidence` and returns no partial result. The distinct affected-service count is derived from the complete path set, so there is no separate count query.
 
-```cypher
-MATCH p=(dependent:Service)-[:DEPENDS_ON*1..4]->(failed:Service {id: $service_id})
-WHERE length(p) <= $max_depth AND dependent.id <> failed.id
-RETURN count(DISTINCT dependent.id) AS total
-```
+`incomplete_graph_evidence` is also raised when path or evidence fields are missing or invalid, a path cannot be validated, or FalkorDB's `RESULTSET_SIZE` is below 501. If the setting cannot be read or has an invalid response, the read fails with `database_unavailable` or `graph_query_failed`. Since this FalkorDB setting can change at runtime, it is checked immediately before and after every graph read. The application does not change the server's global setting.
 
 Incident evidence is retrieved with these fixed relationship patterns:
 
@@ -142,6 +140,6 @@ Run real FalkorDB integration tests with:
 uv run --locked --env-file .env --python 3.13 pytest -q
 ```
 
-The Phase 1 evidence report records the exact environment, commands, outputs, and test results: [docs/PHASE1-REPORT.md](docs/PHASE1-REPORT.md).
+The Phase 1 evidence report records the original implementation evidence: [docs/PHASE1-REPORT.md](docs/PHASE1-REPORT.md). The focused hardening evidence is in [docs/PHASE1.1-REPORT.md](docs/PHASE1.1-REPORT.md).
 
 Current limits: synthetic single-incident dataset; no live telemetry or incident ingestion; causality is not inferred; traversal depth is at most four and each path query returns at most 500 rows; local single-user setup. No Agent, MCP server, UI, model orchestration, approval flow, remediation action, external API call, or deployment was implemented in Phase 1.

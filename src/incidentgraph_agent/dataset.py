@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
 from importlib.resources import files
 from typing import Any
 
 from incidentgraph_agent.errors import GraphQueryError
+from incidentgraph_agent.evidence import EvidenceValidationError, validate_record
 
-_IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 _NODE_LABELS = {"Service", "Deployment", "Alert", "Incident", "Team"}
 
 
@@ -19,6 +18,8 @@ def load_dataset() -> dict[str, Any]:
 
 
 def validate_dataset(dataset: dict[str, Any]) -> None:
+    if not isinstance(dataset, dict):
+        raise GraphQueryError("The bundled synthetic graph dataset is malformed.")
     nodes = dataset.get("nodes")
     relationships = dataset.get("relationships")
     if (
@@ -34,13 +35,17 @@ def validate_dataset(dataset: dict[str, Any]) -> None:
             raise GraphQueryError("The bundled synthetic graph dataset is malformed.")
         ids: set[str] = set()
         for record in records:
-            if not isinstance(record, dict):
-                raise GraphQueryError("The bundled synthetic graph dataset is malformed.")
-            identifier = record.get("id")
-            if not isinstance(identifier, str) or not _IDENTIFIER.fullmatch(identifier):
-                raise GraphQueryError("The bundled dataset contains an invalid node ID.")
+            try:
+                validated = validate_record(label, record)
+            except EvidenceValidationError as exc:
+                raise GraphQueryError(
+                    "The bundled synthetic graph dataset contains invalid evidence."
+                ) from exc
+            identifier = validated["id"]
             if identifier in ids:
-                raise GraphQueryError("The bundled dataset contains duplicate node IDs.")
+                raise GraphQueryError(
+                    "The bundled dataset contains duplicate node IDs."
+                )
             ids.add(identifier)
         known[label] = ids
 
@@ -52,7 +57,9 @@ def validate_dataset(dataset: dict[str, Any]) -> None:
         "OWNED_BY": ("Service", "Team"),
     }
     if set(relationships) != set(endpoints):
-        raise GraphQueryError("The bundled dataset has an unsupported relationship type.")
+        raise GraphQueryError(
+            "The bundled dataset has an unsupported relationship type."
+        )
     for relation, records in relationships.items():
         source_label, target_label = endpoints[relation]
         if not isinstance(records, list):

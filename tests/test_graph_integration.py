@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+from uuid import uuid4
 
 import pytest
 
@@ -23,9 +24,7 @@ def _counts(store) -> tuple[dict[str, int], int]:
         label: int(store.read(query).result_set[0][0])
         for label, query in labels.items()
     }
-    relationships = int(
-        store.read("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
-    )
+    relationships = int(store.read("MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
     return nodes, relationships
 
 
@@ -171,7 +170,9 @@ def test_blast_radius_traverses_incoming_dependencies(repository):
 def test_shared_downstream_dependency_preserves_distinct_paths(repository):
     result = repository.blast_radius("payment-db")
     checkout = next(
-        item for item in result["affected_services"] if item["service_id"] == "checkout-api"
+        item
+        for item in result["affected_services"]
+        if item["service_id"] == "checkout-api"
     )
     paths = {tuple(path["service_ids"]) for path in checkout["paths"]}
     assert paths == {
@@ -237,6 +238,83 @@ def test_deployment_and_alert_evidence_is_correlated_not_causal(repository):
             "causality_status": "unproven",
         }
     ]
+
+
+def test_correlation_sorts_mixed_timezone_offsets_by_instant_and_preserves_text(store):
+    prefix = f"offset-{uuid4().hex}"
+    older = "2026-10-15T09:00:00+13:00"
+    newer = "2026-10-15T08:30:00+00:00"
+    store.write(
+        """
+        UNWIND $rows AS row
+        MERGE (d:Deployment {id: row.id})
+        SET d.version = row.version, d.deployed_at = row.deployed_at,
+            d.status = row.status
+        WITH d, row
+        MATCH (s:Service {id: $service_id})
+        MERGE (d)-[:DEPLOYED_TO]->(s)
+        """,
+        {
+            "service_id": "checkout-api",
+            "rows": [
+                {
+                    "id": f"{prefix}-deployment-older",
+                    "version": "v1",
+                    "deployed_at": older,
+                    "status": "succeeded",
+                },
+                {
+                    "id": f"{prefix}-deployment-newer",
+                    "version": "v2",
+                    "deployed_at": newer,
+                    "status": "succeeded",
+                },
+            ],
+        },
+    )
+    store.write(
+        """
+        UNWIND $rows AS row
+        MERGE (a:Alert {id: row.id})
+        SET a.severity = row.severity, a.timestamp = row.timestamp,
+            a.description = row.description
+        WITH a, row
+        MATCH (s:Service {id: $service_id})
+        MERGE (a)-[:ALERTS_ON]->(s)
+        """,
+        {
+            "service_id": "checkout-api",
+            "rows": [
+                {
+                    "id": f"{prefix}-alert-older",
+                    "severity": "low",
+                    "timestamp": older,
+                    "description": "Earlier instant with a later local wall time.",
+                },
+                {
+                    "id": f"{prefix}-alert-newer",
+                    "severity": "high",
+                    "timestamp": newer,
+                    "description": "Later instant with an earlier UTC wall time.",
+                },
+            ],
+        },
+    )
+
+    result = IncidentRepository(store).correlate(service_id="checkout-api")
+    deployments = result["evidence"]["deployments"]
+    alerts = result["evidence"]["alerts"]
+
+    assert [item["id"] for item in deployments[:2]] == [
+        f"{prefix}-deployment-newer",
+        f"{prefix}-deployment-older",
+    ]
+    assert [item["deployed_at"] for item in deployments[:2]] == [newer, older]
+    assert [item["id"] for item in alerts[:2]] == [
+        f"{prefix}-alert-newer",
+        f"{prefix}-alert-older",
+    ]
+    assert [item["timestamp"] for item in alerts[:2]] == [newer, older]
 
 
 def test_investigation_summary_has_explainable_graph_paths(repository):
@@ -368,9 +446,7 @@ def test_blast_radius_and_investigation_fail_closed_above_path_limit(store):
         repository.investigate(incident_id)
 
 
-def test_graph_ablation_returns_error_without_invented_evidence(
-    monkeypatch, capsys
-):
+def test_graph_ablation_returns_error_without_invented_evidence(monkeypatch, capsys):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         unavailable_port = sock.getsockname()[1]

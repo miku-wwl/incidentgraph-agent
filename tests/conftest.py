@@ -11,7 +11,7 @@ from incidentgraph_agent.repository import IncidentRepository
 from incidentgraph_agent.seed import seed_dataset
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def store() -> FalkorStore:
     settings = replace(
         Settings.from_env(), graph_name=f"incidentgraph_test_{uuid4().hex}"
@@ -29,6 +29,6 @@ def store() -> FalkorStore:
             graph_store.close()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def repository(store: FalkorStore) -> IncidentRepository:
     return IncidentRepository(store)

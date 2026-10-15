@@ -4,7 +4,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from incidentgraph_agent.database import FalkorStore
-from incidentgraph_agent.errors import IncompleteGraphEvidence, NotFound
+from incidentgraph_agent.errors import IncompleteGraphEvidence, InvalidInput, NotFound
+from incidentgraph_agent.evidence import (
+    EvidenceValidationError,
+    parse_timestamp,
+    validate_record,
+)
 from incidentgraph_agent.validation import validate_identifier, validate_max_depth
 
 _RESULT_LIMIT = 500
@@ -48,22 +53,26 @@ def _validated_path(
         )
     return depth, path
 
+
 _SERVICE_LOOKUP = """
     MATCH (s:Service {id: $service_id})
-    RETURN s.id AS id, s.name AS name
+    RETURN s.id AS id,
+           s.name AS name,
+           s.environment AS environment,
+           s.criticality AS criticality
     LIMIT 1
 """
 _DEPENDENCY_PATHS = """
     MATCH p=(source:Service {id: $service_id})-[:DEPENDS_ON*1..4]->(target:Service)
     WHERE length(p) <= $max_depth
-      AND all(node IN nodes(p) WHERE single(candidate IN nodes(p) WHERE candidate.id = node.id))
+      AND all(node IN nodes(p) WHERE single(candidate IN nodes(p) WHERE id(candidate) = id(node)))
     RETURN [n IN nodes(p) | n.id] AS path_ids, length(p) AS depth
     LIMIT $limit
 """
 _BLAST_RADIUS_PATHS = """
     MATCH p=(dependent:Service)-[:DEPENDS_ON*1..4]->(failed:Service {id: $service_id})
     WHERE length(p) <= $max_depth AND dependent.id <> failed.id
-      AND all(node IN nodes(p) WHERE single(candidate IN nodes(p) WHERE candidate.id = node.id))
+      AND all(node IN nodes(p) WHERE single(candidate IN nodes(p) WHERE id(candidate) = id(node)))
     RETURN dependent.id AS service_id,
            [n IN nodes(p) | n.id] AS path_ids,
            length(p) AS depth
@@ -104,10 +113,27 @@ _ALERTS_FOR_SERVICES = """
 
 
 def _timestamp(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("timestamp must include a timezone")
-    return parsed
+    try:
+        return parse_timestamp(value, field="timestamp")
+    except EvidenceValidationError as exc:
+        raise IncompleteGraphEvidence(
+            "FalkorDB returned evidence with an invalid timestamp."
+        ) from exc
+
+
+def _query_record(label: str, row: Any, fields: tuple[str, ...]) -> dict[str, str]:
+    if not isinstance(row, (list, tuple)) or len(row) != len(fields):
+        raise IncompleteGraphEvidence(
+            "FalkorDB returned evidence that could not be validated; "
+            "no partial evidence was returned."
+        )
+    try:
+        return validate_record(label, dict(zip(fields, row, strict=True)))
+    except EvidenceValidationError as exc:
+        raise IncompleteGraphEvidence(
+            "FalkorDB returned evidence with a missing or invalid required field; "
+            "no partial evidence was returned."
+        ) from exc
 
 
 def _path_tuple(value: Any) -> tuple[str, ...] | None:
@@ -117,6 +143,11 @@ def _path_tuple(value: Any) -> tuple[str, ...] | None:
         return None
     path = tuple(value)
     if len(path) < 2 or len(set(path)) != len(path):
+        return None
+    try:
+        for item in path:
+            validate_identifier(item, field="path service ID")
+    except InvalidInput:
         return None
     return path
 
@@ -159,7 +190,11 @@ class IncidentRepository:
                 {path[1] for depth, path in ordered if depth == 1}
             ),
             "paths": [
-                {"service_ids": list(path), "relationship": "DEPENDS_ON", "depth": depth}
+                {
+                    "service_ids": list(path),
+                    "relationship": "DEPENDS_ON",
+                    "depth": depth,
+                }
                 for depth, path in ordered
             ],
             "truncated": False,
@@ -241,8 +276,6 @@ class IncidentRepository:
         incident_id: str | None = None,
     ) -> dict[str, Any]:
         if (service_id is None) == (incident_id is None):
-            from incidentgraph_agent.errors import InvalidInput
-
             raise InvalidInput("Supply exactly one of service_id or incident_id.")
 
         incident: dict[str, Any] | None = None
@@ -255,15 +288,35 @@ class IncidentRepository:
             if not rows:
                 raise NotFound(f"Unknown incident id: {incident_id}.")
             row = rows[0]
-            service_ids = sorted(
-                {str(item) for item in (row[4] or []) if item is not None}
+            if not isinstance(row, (list, tuple)) or len(row) != 5:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned incident evidence that could not be validated."
+                )
+            incident_record = _query_record(
+                "Incident", row[:4], ("id", "started_at", "status", "summary")
             )
-            incident_started_at = str(row[1])
+            raw_service_ids = row[4]
+            if not isinstance(raw_service_ids, (list, tuple)):
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned invalid incident service references."
+                )
+            try:
+                service_ids = sorted(
+                    {
+                        validate_identifier(item, field="involved service ID")
+                        for item in raw_service_ids
+                    }
+                )
+            except InvalidInput as exc:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned invalid incident service references."
+                ) from exc
+            incident_started_at = incident_record["started_at"]
             incident = {
-                "id": str(row[0]),
+                "id": incident_record["id"],
                 "started_at": incident_started_at,
-                "status": str(row[2]),
-                "summary": str(row[3]),
+                "status": incident_record["status"],
+                "summary": incident_record["summary"],
                 "involved_service_ids": service_ids,
             }
             target = {"type": "incident", **incident}
@@ -274,50 +327,88 @@ class IncidentRepository:
             service_ids = [service_id]
             target = {"type": "service", **service}
 
-        deployments = self.store.read(
-            _DEPLOYMENTS_FOR_SERVICES,
-            {"service_ids": service_ids, "limit": _RESULT_FETCH_LIMIT},
-        ).result_set if service_ids else []
-        alerts = self.store.read(
-            _ALERTS_FOR_SERVICES,
-            {"service_ids": service_ids, "limit": _RESULT_FETCH_LIMIT},
-        ).result_set if service_ids else []
+        deployments = (
+            self.store.read(
+                _DEPLOYMENTS_FOR_SERVICES,
+                {"service_ids": service_ids, "limit": _RESULT_FETCH_LIMIT},
+            ).result_set
+            if service_ids
+            else []
+        )
+        alerts = (
+            self.store.read(
+                _ALERTS_FOR_SERVICES,
+                {"service_ids": service_ids, "limit": _RESULT_FETCH_LIMIT},
+            ).result_set
+            if service_ids
+            else []
+        )
         _ensure_complete_rows(deployments, evidence_kind="Deployment evidence")
         _ensure_complete_rows(alerts, evidence_kind="Alert evidence")
 
-        deployment_evidence = [
-            {
-                "id": str(row[0]),
-                "version": str(row[1]),
-                "deployed_at": str(row[2]),
-                "status": str(row[3]),
-                "service_id": str(row[4]),
-                "relative_timing": self._relative_timing(
-                    str(row[2]), incident_started_at
-                ),
-            }
-            for row in deployments
-        ]
-        alert_evidence = [
-            {
-                "id": str(row[0]),
-                "severity": str(row[1]),
-                "timestamp": str(row[2]),
-                "description": str(row[3]),
-                "service_id": str(row[4]),
-                "relative_timing": self._relative_timing(
-                    str(row[2]), incident_started_at
-                ),
-            }
-            for row in alerts
-        ]
+        deployment_evidence = []
+        for row in deployments:
+            if not isinstance(row, (list, tuple)) or len(row) != 5:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned deployment evidence that could not be validated."
+                )
+            record = _query_record(
+                "Deployment", row[:4], ("id", "version", "deployed_at", "status")
+            )
+            try:
+                related_service_id = validate_identifier(
+                    row[4], field="deployment service ID"
+                )
+            except InvalidInput as exc:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned deployment evidence with an invalid service ID."
+                ) from exc
+            deployment_evidence.append(
+                {
+                    **record,
+                    "service_id": related_service_id,
+                    "relative_timing": self._relative_timing(
+                        record["deployed_at"], incident_started_at
+                    ),
+                }
+            )
+
+        alert_evidence = []
+        for row in alerts:
+            if not isinstance(row, (list, tuple)) or len(row) != 5:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned alert evidence that could not be validated."
+                )
+            record = _query_record(
+                "Alert", row[:4], ("id", "severity", "timestamp", "description")
+            )
+            try:
+                related_service_id = validate_identifier(
+                    row[4], field="alert service ID"
+                )
+            except InvalidInput as exc:
+                raise IncompleteGraphEvidence(
+                    "FalkorDB returned alert evidence with an invalid service ID."
+                ) from exc
+            alert_evidence.append(
+                {
+                    **record,
+                    "service_id": related_service_id,
+                    "relative_timing": self._relative_timing(
+                        record["timestamp"], incident_started_at
+                    ),
+                }
+            )
+
+        # Stable second sort keeps the tie-break fields ascending, matching Cypher,
+        # while ordering the primary timestamp key by actual UTC instant.
+        deployment_evidence.sort(key=lambda item: (item["id"], item["service_id"]))
         deployment_evidence.sort(
-            key=lambda item: (item["deployed_at"], item["id"], item["service_id"]),
-            reverse=True,
+            key=lambda item: _timestamp(item["deployed_at"]), reverse=True
         )
+        alert_evidence.sort(key=lambda item: (item["id"], item["service_id"]))
         alert_evidence.sort(
-            key=lambda item: (item["timestamp"], item["id"], item["service_id"]),
-            reverse=True,
+            key=lambda item: _timestamp(item["timestamp"]), reverse=True
         )
         candidate_explanations: list[dict[str, Any]] = []
         if incident_started_at is not None:
@@ -330,7 +421,9 @@ class IncidentRepository:
                     alert
                     for alert in alert_evidence
                     if alert["service_id"] == deployment["service_id"]
-                    and deployment_time < _timestamp(alert["timestamp"]) <= incident_time
+                    and deployment_time
+                    < _timestamp(alert["timestamp"])
+                    <= incident_time
                 ]
                 if not following_alerts:
                     continue
@@ -450,7 +543,12 @@ class IncidentRepository:
         rows = self.store.read(_SERVICE_LOOKUP, {"service_id": service_id}).result_set
         if not rows:
             raise NotFound(f"Unknown service id: {service_id}.")
-        return {"id": str(rows[0][0]), "name": str(rows[0][1])}
+        record = _query_record(
+            "Service",
+            rows[0],
+            ("id", "name", "environment", "criticality"),
+        )
+        return {"id": record["id"], "name": record["name"]}
 
     @staticmethod
     def _relative_timing(value: str, incident_started_at: str | None) -> str:
