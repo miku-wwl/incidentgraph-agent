@@ -45,6 +45,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     investigate.add_argument("incident_id")
     investigate.add_argument("--max-depth", type=int, default=4)
+
+    agent = commands.add_parser("agent", help="run the local evidence-grounded Agent")
+    agent_commands = agent.add_subparsers(dest="agent_command", required=True)
+    ask = agent_commands.add_parser(
+        "ask", help="investigate a request with local Ollama"
+    )
+    ask.add_argument("request")
+
+    mcp = commands.add_parser("mcp", help="run the local read-only MCP server")
+    mcp_commands = mcp.add_subparsers(dest="mcp_command", required=True)
+    mcp_commands.add_parser("serve", help="serve trusted graph tools over stdio")
     return parser
 
 
@@ -55,6 +66,38 @@ def _emit(payload: dict[str, Any]) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "mcp":
+            from incidentgraph_agent.mcp_server import serve_stdio
+
+            try:
+                serve_stdio()
+                return 0
+            except IncidentGraphError as exc:
+                print(
+                    json.dumps({"error": {"code": exc.code, "message": str(exc)}}),
+                    file=sys.stderr,
+                )
+                return 2
+            except Exception:
+                print(
+                    "The local IncidentGraph MCP server failed to start.",
+                    file=sys.stderr,
+                )
+                return 2
+        if args.command == "agent":
+            from incidentgraph_agent.agent import AgentLoop, OllamaProvider
+            from incidentgraph_agent.graph_tools import GraphToolRegistry
+
+            settings = Settings.from_env()
+            with OllamaProvider() as provider:
+                with FalkorStore(settings) as store:
+                    result = AgentLoop(
+                        provider,
+                        GraphToolRegistry(IncidentRepository(store)),
+                    ).run(args.request)
+            _emit(result)
+            return 0 if result.get("status") == "complete" else 2
+
         settings = Settings.from_env()
         with FalkorStore(settings) as store:
             if args.command == "check":

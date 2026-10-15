@@ -6,6 +6,8 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
   "agentic-intent-gate @ git+https://github.com/miku-wwl/agentic-intent-gate.git@7261fdd2f47d2b15fabe8faac527eeee37338eb1",
   "falkordb>=1.8.0,<2.0",
+  "httpx>=0.28,<1",
+  "mcp>=2,<3",
 ]
 
 [project.scripts]
