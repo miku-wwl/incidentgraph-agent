@@ -1,0 +1,66 @@
+{
+  "scenario": "Synthetic payment failures shortly after a payment-service deployment",
+  "note": "All entities, timestamps, alerts, and deployment records are synthetic. Temporal correlation does not establish causation.",
+  "nodes": {
+    "Service": [
+      {"id": "checkout-api", "name": "Checkout API", "environment": "production", "criticality": "critical"},
+      {"id": "payment-service", "name": "Payment Service", "environment": "production", "criticality": "critical"},
+      {"id": "payment-db", "name": "Payment Database", "environment": "production", "criticality": "critical"},
+      {"id": "ledger-service", "name": "Ledger Service", "environment": "production", "criticality": "high"},
+      {"id": "order-api", "name": "Order API", "environment": "production", "criticality": "high"},
+      {"id": "notification-service", "name": "Notification Service", "environment": "production", "criticality": "medium"},
+      {"id": "catalog-api", "name": "Catalog API", "environment": "production", "criticality": "low"},
+      {"id": "search-api", "name": "Search API", "environment": "production", "criticality": "low"}
+    ],
+    "Deployment": [
+      {"id": "deploy-payment-2026-10-15", "version": "2026.10.15.2", "deployed_at": "2026-10-15T07:55:00+13:00", "status": "succeeded"},
+      {"id": "deploy-checkout-2026-10-12", "version": "2026.10.12.1", "deployed_at": "2026-10-12T10:00:00+13:00", "status": "succeeded"}
+    ],
+    "Alert": [
+      {"id": "alert-payment-5xx-001", "severity": "critical", "timestamp": "2026-10-15T08:17:00+13:00", "description": "Synthetic elevated 5xx rate observed on payment-service."},
+      {"id": "alert-checkout-timeout-001", "severity": "high", "timestamp": "2026-10-15T08:19:00+13:00", "description": "Synthetic checkout requests timed out while calling payment-service."}
+    ],
+    "Incident": [
+      {"id": "incident-payment-001", "started_at": "2026-10-15T08:20:00+13:00", "status": "investigating", "summary": "Synthetic payment requests are failing after a recent payment-service deployment."}
+    ],
+    "Team": [
+      {"id": "team-payments", "name": "Payments"},
+      {"id": "team-commerce", "name": "Commerce"},
+      {"id": "team-notifications", "name": "Notifications"},
+      {"id": "team-discovery", "name": "Discovery"}
+    ]
+  },
+  "relationships": {
+    "DEPENDS_ON": [
+      {"source_id": "checkout-api", "target_id": "payment-service"},
+      {"source_id": "checkout-api", "target_id": "order-api"},
+      {"source_id": "payment-service", "target_id": "payment-db"},
+      {"source_id": "payment-service", "target_id": "ledger-service"},
+      {"source_id": "order-api", "target_id": "payment-db"},
+      {"source_id": "notification-service", "target_id": "checkout-api"},
+      {"source_id": "search-api", "target_id": "catalog-api"}
+    ],
+    "DEPLOYED_TO": [
+      {"source_id": "deploy-payment-2026-10-15", "target_id": "payment-service"},
+      {"source_id": "deploy-checkout-2026-10-12", "target_id": "checkout-api"}
+    ],
+    "ALERTS_ON": [
+      {"source_id": "alert-payment-5xx-001", "target_id": "payment-service"},
+      {"source_id": "alert-checkout-timeout-001", "target_id": "checkout-api"}
+    ],
+    "INVOLVES": [
+      {"source_id": "incident-payment-001", "target_id": "payment-service"},
+      {"source_id": "incident-payment-001", "target_id": "checkout-api"}
+    ],
+    "OWNED_BY": [
+      {"source_id": "checkout-api", "target_id": "team-commerce"},
+      {"source_id": "payment-service", "target_id": "team-payments"},
+      {"source_id": "payment-db", "target_id": "team-payments"},
+      {"source_id": "ledger-service", "target_id": "team-payments"},
+      {"source_id": "order-api", "target_id": "team-commerce"},
+      {"source_id": "notification-service", "target_id": "team-notifications"},
+      {"source_id": "catalog-api", "target_id": "team-discovery"},
+      {"source_id": "search-api", "target_id": "team-discovery"}
+    ]
+  }
+}

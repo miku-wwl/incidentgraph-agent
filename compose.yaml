@@ -1,0 +1,23 @@
+name: incidentgraph-agent-phase1
+
+services:
+  falkordb:
+    image: falkordb/falkordb-server@sha256:8e4fe29e6646890a9deaf2f009ad2bc5e592d79fe9cd718810c3a97a8bcd34c0
+    environment:
+      REDIS_ARGS: "--requirepass ${FALKORDB_PASSWORD:?Set FALKORDB_PASSWORD in the local .env file}"
+      REDISCLI_AUTH: "${FALKORDB_PASSWORD:?Set FALKORDB_PASSWORD in the local .env file}"
+    ports:
+      - "127.0.0.1:${FALKORDB_HOST_PORT:-16379}:6379"
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  falkordb_data:
+    name: incidentgraph-agent-phase1-data

@@ -1,0 +1,29 @@
+[project]
+name = "incidentgraph-agent"
+version = "0.1.0"
+description = "Evidence-based incident investigation over FalkorDB"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "agentic-intent-gate @ git+https://github.com/miku-wwl/agentic-intent-gate.git@7261fdd2f47d2b15fabe8faac527eeee37338eb1",
+  "falkordb>=1.8.0,<2.0",
+]
+
+[project.scripts]
+incidentgraph = "incidentgraph_agent.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=9,<10"]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/incidentgraph_agent"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
