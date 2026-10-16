@@ -2,7 +2,7 @@
 
 **Status: PARTIAL — local demo console and review package are prepared; human-approved end-to-end evidence and demo video remain pending.**
 **Repository baseline:** `70888c104e945550152ba1d400d6d7f4b716a94f` (`main`).
-**Current delivery:** uncommitted local changes only. No commit, push, deployment, or organizer submission was performed.
+**Current delivery:** committed on `main` and pushed to `origin/main`. No deployment or organizer submission was performed.
 
 ## Scope and outcome
 
