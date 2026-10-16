@@ -1,6 +1,6 @@
 # incidentgraph-agent
 
-> **Graph Hacks 2026 — Phase 2 Agent and MCP implementation.** Phase 0 was pre-competition preparation. Phase 1 added the local FalkorDB graph and deterministic investigation. Phase 2 adds a bounded local Agent Loop, trusted read-only graph tools, and an stdio MCP server.
+> **Graph Hacks 2026 — Phase 3 approval-gated local incident action.** Phase 0 was pre-competition preparation. Phase 1 added the local FalkorDB graph and deterministic investigation. Phase 2 added the bounded local Agent Loop, trusted read-only graph tools, and stdio MCP server. Phase 3 adds one Runtime-gated action that writes a ticket only to a consumer-owned local SQLite database.
 
 ## Competition and project
 
@@ -16,9 +16,9 @@ The official hacking window is **October 15, 2026, 12:01 AM IST (7:31 AM NZDT)**
 
 - **Phase 0, completed before kickoff:** AGENTS.md and README preparation, Docker/FalkorDB infrastructure verification, Agentic Intent Gate dependency verification, and the [Phase 0 evidence report](docs/PHASE0-CLOSURE.md). No competition-specific application implementation was done before kickoff.
 - **Phase 1, implemented after kickoff:** the consumer Python package, FalkorDB Compose configuration, synthetic graph, seed command, read-only investigation queries, tests, and this documentation.
-- **Pre-existing shared runtime:** [Agentic Intent Gate](https://github.com/miku-wwl/agentic-intent-gate) v0.2.0 remains pinned to `7261fdd2f47d2b15fabe8faac527eeee37338eb1` as an installed dependency. Its source was not copied or modified. Phase 2 does not compose or execute Runtime Actions; the dependency is retained for a separately reviewed Phase 3 integration.
+- **Pre-existing shared runtime:** [Agentic Intent Gate](https://github.com/miku-wwl/agentic-intent-gate) v0.2.0 remains pinned to `7261fdd2f47d2b15fabe8faac527eeee37338eb1` as an installed dependency. Its source was not copied or modified. Phase 3 consumes its public Runtime API; the shared Runtime remains unchanged.
 - **Phase 2, implemented after kickoff:** local Ollama model decisions, the bounded Agent Loop, four trusted graph tools, the stdio MCP server, CLI entry points, and their tests.
-- **Phase 3, planned:** any Runtime Action composition, approval/authorization flow, or remediation. Nothing in Phase 2 executes side effects.
+- **Phase 3, implemented:** a deterministic evidence-bound Plan, separate human Approval and Runtime Authorization steps, and one local SQLite incident-ticket effect. It does not perform service remediation or expose write operations through Agent or MCP tools.
 
 Codex assisted with implementation and documentation. The project owner is responsible for reviewing and being able to explain the submitted code and design.
 
@@ -39,6 +39,38 @@ Model-generated free text is never trusted as an answer. When every Task Contrac
 The Agent response keeps these fields distinct: `task_completed` means every requested contract requirement matched the exact tool arguments and complete evidence identity; `evidence_complete` means returned graph observations passed the graph completeness checks, even if they do not satisfy the requested target; `answer_source` is `deterministic` only when a trusted summary is emitted; `model_answer_grounded` remains `false` because raw model prose is not used; and `causality.status` is `unproven` for incident investigation or `not_assessed` for service-only requests. Unsupported, errored, or incomplete tasks have `task_completed: false` and no answer. `evidence_complete=true` does not establish source freshness or ground truth.
 
 The MCP server uses the official Python MCP SDK's low-level server over local stdio. `incidentgraph mcp serve` exposes the same four tools with explicit JSON Schemas (`additionalProperties: false`) and server-side argument validation. It has no graph-write, arbitrary Cypher, ticket, approval, shell, or arbitrary HTTP tool.
+
+### Phase 3 approval-gated local ticket
+
+Phase 3 reuses the completed Agent and graph repository to investigate one exact incident. A trusted consumer function accepts only a completed Phase 2.1 result with `task_completed=true`, `evidence_complete=true`, `answer_source=deterministic`, an exact incident target, and validated complete graph paths. It creates a canonical evidence snapshot with incident status/summary, service IDs, affected services and paths, deployment/alert IDs and timestamps, unproven causality, graph identity, and observation time. The SHA-256 digest binds the canonical snapshot, including its observation time; model prose, tool timings, and random request IDs are excluded. Snapshot age is limited to ten minutes. Source-data ages are displayed separately and old synthetic event times do not make a newly observed snapshot stale.
+
+The action Plan is supplied by a deterministic consumer-owned `ModelProvider`; it derives the four flat arguments only from that snapshot. One exact `SIDE_EFFECT` binding registers `create_local_incident_ticket` v1 for one trusted local SQLite ticket store. The Action arguments are the incident ID, evidence digest, snapshot observation time, and affected-service count. The full evidence stays in a separate snapshot SQLite database. The Runtime gate/ledger, ticket/effect/receipt store, and evidence snapshots use three distinct SQLite files under the configured action home. The installed `agentic-intent-gate==0.2.0` dependency remains pinned to commit `7261fdd2f47d2b15fabe8faac527eeee37338eb1`; the default five-second execution profile is used.
+
+Each command advances at most one lifecycle stage. `propose` investigates with local Ollama and creates an `AwaitingApproval` Run; it never approves or executes. `review` displays the exact Plan digest, target, risk, affected services, graph paths, evidence references, snapshot age, source timestamps, and causality uncertainty. `approve` or `reject` requires the exact typed Plan challenge. `admit` is a separate Runtime call. `authorize` requires a separate exact Action challenge. `execute` requires a further exact confirmation, re-queries and verifies graph evidence, and then calls the Runtime Gateway once. The Agent and read-only MCP server cannot admit, authorize, or execute an Action.
+
+The local executor validates the full Runtime `ExecutionSpec`, tool/target/binding/scope identity, flat arguments, stored evidence digest, snapshot age, and a fresh complete graph read before inserting a ticket. SQLite uses a transaction, unique effect key and receipt, full synchronous writes, and read-back verification. A matching committed effect returns its original receipt; a conflicting payload fails closed. A lost commit acknowledgment or unverifiable receipt becomes `Unknown`; terminal Unknown Actions are not automatically retried. Runtime history, the graph, and the ticket database cannot participate in one atomic transaction, so evidence rechecks are point-in-time checks rather than universal freshness or isolation guarantees. Local CLI confirmation and the local capability file are demonstration controls, not production multi-user authentication.
+
+#### Phase 3 setup and manual walkthrough
+
+Use the prerequisites in [Local setup](#local-setup), including a running project FalkorDB container and local Ollama with `phi4-mini:latest`. Initialize a **new, unused** consumer-owned data directory. By default Windows uses `%LOCALAPPDATA%\IncidentGraphAgent\phase3-actions`; set `INCIDENTGRAPH_ACTION_HOME` or pass `--home` to choose another private local directory. Do not copy these SQLite files into the repository or edit the capability/identity files.
+
+The following is a manual walkthrough; it was not run automatically as part of this implementation. Keep each command separate and review its JSON output before proceeding:
+
+```powershell
+uv run --locked --env-file .env --python 3.13 incidentgraph action init
+uv run --locked --env-file .env --python 3.13 incidentgraph action propose incident-payment-001
+# Copy run_id from the proposal JSON and replace this quoted placeholder.
+uv run --locked --env-file .env --python 3.13 incidentgraph action review "paste-run-id-here"
+uv run --locked --env-file .env --python 3.13 incidentgraph action approve "paste-run-id-here"
+uv run --locked --env-file .env --python 3.13 incidentgraph action admit "paste-run-id-here"
+# Copy action_id from the admission JSON and replace this quoted placeholder.
+uv run --locked --env-file .env --python 3.13 incidentgraph action authorize "paste-action-id-here"
+uv run --locked --env-file .env --python 3.13 incidentgraph action execute "paste-action-id-here"
+uv run --locked --env-file .env --python 3.13 incidentgraph action status "paste-action-id-here"
+uv run --locked --env-file .env --python 3.13 incidentgraph action tickets
+```
+
+At the interactive prompts, type the complete displayed challenge exactly: `APPROVE <plan-digest>`, `AUTHORIZE <action-id>`, or `EXECUTE <action-id>`. Approval alone never authorizes execution. Review and verify the ticket receipt returned by `execute`; the `status` and `tickets` commands read the persisted local databases after the process has closed and reopened them. This demonstration creates one reversible local SQLite record and does not modify the incident graph or remediate a service.
 
 ### Graph model
 
@@ -160,6 +192,12 @@ uv run --locked --env-file .env --python 3.13 pytest -q
 
 The unit suite for the tool registry and Agent loop can be run with `uv run --locked --python 3.13 pytest -q tests/test_graph_tools.py tests/test_agent.py`. `tests/test_mcp_integration.py` starts the MCP server over stdio and uses a real MCP client to query the real FalkorDB service.
 
-Historical evidence: [Phase 0 closure](docs/PHASE0-CLOSURE.md), [Phase 1 report](docs/PHASE1-REPORT.md), [Phase 1.1 report](docs/PHASE1.1-REPORT.md), [Phase 1.2 report](docs/PHASE1.2-REPORT.md). Phase 2 implementation evidence is in [docs/PHASE2-REPORT.md](docs/PHASE2-REPORT.md), and the current Agent hardening evidence is in [docs/PHASE2.1-REPORT.md](docs/PHASE2.1-REPORT.md).
+The Phase 3 snapshot and approval-gated Runtime integration tests use the real local FalkorDB service and isolated temporary Runtime, evidence, and ticket stores:
 
-Current limits: synthetic single-incident dataset; no live telemetry or incident ingestion; temporal correlation does not infer causality; traversal depth is at most four and each path query returns at most 500 rows; local single-user setup. There is no web UI, cloud deployment, ticket integration, or Phase 3 action execution. The graph tools are read-only; no action is authorized or executed by this Agent.
+```powershell
+uv run --locked --env-file .env --python 3.13 pytest -q tests/test_action_cli.py tests/test_action_evidence.py tests/test_ticket_actions.py
+```
+
+Historical evidence: [Phase 0 closure](docs/PHASE0-CLOSURE.md), [Phase 1 report](docs/PHASE1-REPORT.md), [Phase 1.1 report](docs/PHASE1.1-REPORT.md), [Phase 1.2 report](docs/PHASE1.2-REPORT.md). Phase 2 implementation evidence is in [docs/PHASE2-REPORT.md](docs/PHASE2-REPORT.md), Phase 2.1 hardening evidence is in [docs/PHASE2.1-REPORT.md](docs/PHASE2.1-REPORT.md), and Phase 3 implementation evidence is in [docs/PHASE3-REPORT.md](docs/PHASE3-REPORT.md).
+
+Current limits: synthetic single-incident dataset; no live telemetry or incident ingestion; temporal correlation does not infer causality; traversal depth is at most four and each path query returns at most 500 rows; local single-user setup. Phase 3 creates only a local follow-up ticket; it does not call Jira, PagerDuty, or ServiceNow and does not remediate services. There is no web UI, cloud deployment, production authentication, multi-user authorization, or distributed execution. Graph tools and MCP remain read-only; an Agent cannot authorize or execute an Action.

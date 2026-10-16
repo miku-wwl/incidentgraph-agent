@@ -56,6 +56,33 @@ def _parser() -> argparse.ArgumentParser:
     mcp = commands.add_parser("mcp", help="run the local read-only MCP server")
     mcp_commands = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_commands.add_parser("serve", help="serve trusted graph tools over stdio")
+
+    action = commands.add_parser(
+        "action", help="manage a separately gated local incident ticket action"
+    )
+    action_commands = action.add_subparsers(dest="action_command", required=True)
+    for name, help_text in (
+        ("init", "create isolated local action stores and Runtime identity"),
+        (
+            "propose",
+            "investigate with local Ollama and create an awaiting-approval Run",
+        ),
+        ("review", "show the exact Plan and evidence snapshot for a Run"),
+        ("approve", "approve a Run after exact human confirmation"),
+        ("reject", "reject a Run after exact human confirmation"),
+        ("admit", "admit an approved Run as a pending Action"),
+        ("authorize", "independently authorize one pending Action"),
+        ("execute", "execute one authorized local ticket action"),
+        ("status", "inspect one Run or Action status"),
+        ("tickets", "list locally persisted incident tickets"),
+    ):
+        subcommand = action_commands.add_parser(name, help=help_text)
+        subcommand.add_argument("--home", help="consumer-owned action data directory")
+    action_commands.choices["propose"].add_argument("incident_id")
+    for name in ("review", "approve", "reject", "admit"):
+        action_commands.choices[name].add_argument("run_id")
+    for name in ("authorize", "execute", "status"):
+        action_commands.choices[name].add_argument("action_id")
     return parser
 
 
@@ -66,6 +93,8 @@ def _emit(payload: dict[str, Any]) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "action":
+            return _run_action_command(args)
         if args.command == "mcp":
             from incidentgraph_agent.mcp_server import serve_stdio
 
@@ -134,6 +163,126 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "error": {
                     "code": "unexpected_error",
                     "message": "The requested local graph operation failed.",
+                }
+            }
+        )
+        return 2
+
+
+def _run_action_command(args: argparse.Namespace) -> int:
+    from incidentgraph_agent.ticket_actions import (
+        ActionWorkflowError,
+        action_status,
+        admit_run,
+        authorize_action,
+        create_action_proposal,
+        decide_run,
+        default_action_home,
+        execute_action,
+        list_tickets,
+        provision_action_workspace,
+        review_run,
+    )
+
+    home = default_action_home(args.home)
+    try:
+        if args.action_command == "init":
+            payload = provision_action_workspace(home)
+        elif args.action_command == "review":
+            payload = review_run(home, args.run_id)
+        elif args.action_command == "status":
+            payload = action_status(home, args.action_id)
+        elif args.action_command == "tickets":
+            payload = list_tickets(home)
+        elif args.action_command == "propose":
+            from incidentgraph_agent.agent import AgentLoop, OllamaProvider
+            from incidentgraph_agent.graph_tools import GraphToolRegistry
+
+            settings = Settings.from_env()
+            request = f"Investigate {args.incident_id} and explain which services may be affected."
+            with OllamaProvider() as provider, FalkorStore(settings) as store:
+                result = AgentLoop(
+                    provider,
+                    GraphToolRegistry(IncidentRepository(store)),
+                ).run(request)
+                from incidentgraph_agent.action_evidence import (
+                    build_snapshot_from_agent_result,
+                )
+
+                snapshot = build_snapshot_from_agent_result(
+                    result,
+                    incident_id=args.incident_id,
+                    graph_identity=settings.graph_name,
+                )
+                payload = create_action_proposal(home, snapshot, graph_store=store)
+                payload["investigation"] = {
+                    "status": result["status"],
+                    "answer_source": result["answer_source"],
+                    "model": result["model"],
+                    "evidence_digest": snapshot["evidence_digest"],
+                }
+        elif args.action_command in {
+            "approve",
+            "reject",
+            "admit",
+            "authorize",
+            "execute",
+        }:
+            settings = Settings.from_env()
+            with FalkorStore(settings) as store:
+
+                def confirm(challenge: str) -> str:
+                    return input(f"Type {challenge}: ")
+
+                if args.action_command in {"approve", "reject"}:
+                    payload = decide_run(
+                        home,
+                        args.run_id,
+                        approve=args.action_command == "approve",
+                        confirm=confirm,
+                        graph_store=store,
+                    )
+                elif args.action_command == "admit":
+                    payload = admit_run(home, args.run_id, graph_store=store)
+                elif args.action_command == "authorize":
+                    payload = authorize_action(
+                        home,
+                        args.action_id,
+                        confirm=confirm,
+                        graph_store=store,
+                    )
+                else:
+                    payload = execute_action(
+                        home,
+                        args.action_id,
+                        confirm=confirm,
+                        graph_store=store,
+                    )
+        else:
+            raise ActionWorkflowError(
+                "unknown_action_command", "Unsupported action command."
+            )
+        _emit(payload)
+        return 0
+    except (ActionWorkflowError, IncidentGraphError) as exc:
+        _emit({"error": {"code": exc.code, "message": str(exc)}})
+        return 2
+    except (EOFError, KeyboardInterrupt):
+        _emit(
+            {
+                "error": {
+                    "code": "operator_confirmation_cancelled",
+                    "message": "The lifecycle step was cancelled.",
+                }
+            }
+        )
+        return 2
+    except Exception:
+        _emit(
+            {
+                "error": {
+                    "code": "action_operation_failed",
+                    "message": "The local action operation failed closed.",
                 }
             }
         )
