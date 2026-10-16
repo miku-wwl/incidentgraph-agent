@@ -1,0 +1,88 @@
+{
+  "affected_services": [
+    {
+      "depth": 1,
+      "paths": [
+        {
+          "depth": 1,
+          "relationship": "DEPENDS_ON",
+          "service_ids": [
+            "order-api",
+            "payment-db"
+          ]
+        }
+      ],
+      "service_id": "order-api"
+    },
+    {
+      "depth": 1,
+      "paths": [
+        {
+          "depth": 1,
+          "relationship": "DEPENDS_ON",
+          "service_ids": [
+            "payment-service",
+            "payment-db"
+          ]
+        }
+      ],
+      "service_id": "payment-service"
+    },
+    {
+      "depth": 2,
+      "paths": [
+        {
+          "depth": 2,
+          "relationship": "DEPENDS_ON",
+          "service_ids": [
+            "checkout-api",
+            "order-api",
+            "payment-db"
+          ]
+        },
+        {
+          "depth": 2,
+          "relationship": "DEPENDS_ON",
+          "service_ids": [
+            "checkout-api",
+            "payment-service",
+            "payment-db"
+          ]
+        }
+      ],
+      "service_id": "checkout-api"
+    },
+    {
+      "depth": 3,
+      "paths": [
+        {
+          "depth": 3,
+          "relationship": "DEPENDS_ON",
+          "service_ids": [
+            "notification-service",
+            "checkout-api",
+            "order-api",
+            "payment-db"
+          ]
+        },
+        {
+          "depth": 3,
+          "relationship": "DEPENDS_ON",
+          "service_ids": [
+            "notification-service",
+            "checkout-api",
+            "payment-service",
+            "payment-db"
+          ]
+        }
+      ],
+      "service_id": "notification-service"
+    }
+  ],
+  "evidence_complete": true,
+  "failed_service_id": "payment-db",
+  "max_depth": 4,
+  "paths_truncated": false,
+  "relationship_direction": "A DEPENDS_ON B means A requires B; paths run from each affected service to the failed service.",
+  "total_distinct_affected_services": 4
+}

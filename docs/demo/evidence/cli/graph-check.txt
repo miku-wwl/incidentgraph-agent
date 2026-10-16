@@ -1,0 +1,7 @@
+{
+  "graph_module": "loaded",
+  "graph_module_version": 60002,
+  "graph_name": "incidentgraph_phase1",
+  "graph_query_command": "available",
+  "redis_ping": "PONG"
+}

@@ -685,7 +685,8 @@ def admit_run(home: str | Path, run_id: str, *, graph_store) -> dict[str, Any]:
             return {
                 "status": admitted.action.state.value,
                 "replayed": admitted.replayed,
-                "action": admitted.action.snapshot(),
+                "action": admitted.action.snapshot()
+                | {"effect_key": admitted.action.effect_key},
                 "ticket_count": tickets.count(),
             }
     except ActionWorkflowError:
@@ -729,7 +730,8 @@ def authorize_action(
             return {
                 "status": result.action.state.value,
                 "replayed": result.replayed,
-                "action": result.action.snapshot(),
+                "action": result.action.snapshot()
+                | {"effect_key": result.action.effect_key},
                 "evidence_digest": snapshot["evidence_digest"],
             }
     except ActionWorkflowError:
@@ -785,7 +787,8 @@ def execute_action(
             payload = {
                 "status": current_action.state.value,
                 "replayed": result.replayed,
-                "action": current_action.snapshot(),
+                "action": current_action.snapshot()
+                | {"effect_key": current_action.effect_key},
                 "receipt_verified": verified,
             }
             if verified and receipt is not None:
@@ -835,7 +838,7 @@ def action_status(home: str | Path, action_id: str) -> dict[str, Any]:
             )
             return {
                 "status": action.state.value,
-                "action": action.snapshot(),
+                "action": action.snapshot() | {"effect_key": action.effect_key},
                 "snapshot_age_seconds": (
                     ensure_snapshot_fresh(snapshot) if _is_fresh(snapshot) else None
                 ),

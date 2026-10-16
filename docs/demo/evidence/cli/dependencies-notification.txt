@@ -1,0 +1,68 @@
+{
+  "direct_dependencies": [
+    "checkout-api"
+  ],
+  "evidence_complete": true,
+  "max_depth": 4,
+  "paths": [
+    {
+      "depth": 1,
+      "relationship": "DEPENDS_ON",
+      "service_ids": [
+        "notification-service",
+        "checkout-api"
+      ]
+    },
+    {
+      "depth": 2,
+      "relationship": "DEPENDS_ON",
+      "service_ids": [
+        "notification-service",
+        "checkout-api",
+        "order-api"
+      ]
+    },
+    {
+      "depth": 2,
+      "relationship": "DEPENDS_ON",
+      "service_ids": [
+        "notification-service",
+        "checkout-api",
+        "payment-service"
+      ]
+    },
+    {
+      "depth": 3,
+      "relationship": "DEPENDS_ON",
+      "service_ids": [
+        "notification-service",
+        "checkout-api",
+        "order-api",
+        "payment-db"
+      ]
+    },
+    {
+      "depth": 3,
+      "relationship": "DEPENDS_ON",
+      "service_ids": [
+        "notification-service",
+        "checkout-api",
+        "payment-service",
+        "ledger-service"
+      ]
+    },
+    {
+      "depth": 3,
+      "relationship": "DEPENDS_ON",
+      "service_ids": [
+        "notification-service",
+        "checkout-api",
+        "payment-service",
+        "payment-db"
+      ]
+    }
+  ],
+  "relationship_direction": "A DEPENDS_ON B means A requires B.",
+  "service_id": "notification-service",
+  "truncated": false
+}

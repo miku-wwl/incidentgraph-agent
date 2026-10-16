@@ -1,6 +1,6 @@
 # incidentgraph-agent
 
-> **Graph Hacks 2026 — Phase 3 approval-gated local incident action.** Phase 0 was pre-competition preparation. Phase 1 added the local FalkorDB graph and deterministic investigation. Phase 2 added the bounded local Agent Loop, trusted read-only graph tools, and stdio MCP server. Phase 3 adds one Runtime-gated action that writes a ticket only to a consumer-owned local SQLite database.
+> **Graph Hacks 2026 — graph-grounded incident investigation with human-gated local follow-up.** Phase 0 was pre-competition preparation. Phase 1 added the local FalkorDB graph and deterministic investigation. Phase 2 added the bounded local Agent Loop, trusted read-only graph tools, and stdio MCP server. Phase 3 added one Runtime-gated action that writes a ticket only to a consumer-owned local SQLite database. Phase 4 adds a local browser console for the existing investigation and action workflow; it does not perform infrastructure remediation.
 
 ## Competition and project
 
@@ -8,7 +8,7 @@
 
 **Track:** Agents That Act on Connected Data
 
-**Concept:** Graph-powered incident investigation and safe remediation. FalkorDB is the primary graph database and performs dependency traversal, impact analysis, and incident evidence correlation.
+**Concept:** Graph-powered incident investigation and human-approved local ticket follow-up. FalkorDB is the primary graph database and performs dependency traversal, impact analysis, and incident evidence correlation.
 
 The official hacking window is **October 15, 2026, 12:01 AM IST (7:31 AM NZDT)** through **October 18, 2026, 11:59 PM IST (October 19, 7:29 AM NZDT)**. The official rules and event overview require the main work to start after kickoff and the primary graph implementation to be new work. Check the official pages for updates before submission.
 
@@ -73,6 +73,22 @@ uv run --locked --env-file .env --python 3.13 incidentgraph action tickets
 ```
 
 At the interactive prompts, type the complete displayed challenge exactly: `APPROVE <plan-digest>`, `AUTHORIZE <action-id>`, or `EXECUTE <action-id>`. Approval alone never authorizes execution. Review and verify the ticket receipt returned by `execute`; the `status` and `tickets` commands read the persisted local databases after the process has closed and reopened them. This demonstration creates one reversible local SQLite record and does not modify the incident graph or remediate a service.
+
+### Phase 4 local browser console
+
+The local Web Console presents four views: Graph Explorer, AI Investigation, Action Approval, and Tickets & Audit. It reads the live local FalkorDB graph and uses the configured local Ollama model for investigation. The deterministic answer is constructed from validated graph evidence; raw model prose is not used as the answer.
+
+Start from the project root after completing [Local setup](#local-setup), with FalkorDB and Ollama available. Initialize a new private action home only once; if the chosen directory already exists, select a different directory and do not reset it:
+
+```powershell
+$actionHome = Join-Path $env:LOCALAPPDATA 'IncidentGraphAgent\phase4-demo'
+uv run --locked --env-file .env --python 3.13 incidentgraph action init --home $actionHome
+uv run --locked --env-file .env --python 3.13 incidentgraph web serve --home $actionHome --port 8765
+```
+
+Open `http://127.0.0.1:8765/` in a browser on the same computer. The listener binds to loopback and is not a public deployment. Use one process at a time with this private action home; do not run CLI Action commands against the same home while the Web Console is running. In the console, inspect the graph, run an investigation, propose a Plan, then review the exact Plan and evidence. Approval, admission, authorization, and execution are separate steps. The human operator must review and enter each exact confirmation phrase personally. The only supported effect is creating one local SQLite incident ticket; Agent and MCP graph tools stay read-only.
+
+Observed local demonstration evidence is deliberately stopped at the approval gate. The Run is `AwaitingApproval`; no human approval, Action admission, authorization, execution, ticket, or receipt was recorded. The manual approval field remained blank. Screenshots: [Graph Explorer](demo/screenshots/01-graph-explorer.png), [real Ollama investigation](demo/screenshots/02-real-ollama-investigation.png), and [Plan review awaiting human approval](demo/screenshots/03-action-review-awaiting-approval.png). Machine-readable browser evidence and read-only CLI outputs are in [docs/demo/evidence](demo/evidence/README.md).
 
 ### Graph model
 
@@ -200,6 +216,6 @@ The Phase 3 snapshot and approval-gated Runtime integration tests use the real l
 uv run --locked --env-file .env --python 3.13 pytest -q tests/test_action_cli.py tests/test_action_evidence.py tests/test_ticket_actions.py
 ```
 
-Historical evidence: [Phase 0 closure](docs/PHASE0-CLOSURE.md), [Phase 1 report](docs/PHASE1-REPORT.md), [Phase 1.1 report](docs/PHASE1.1-REPORT.md), [Phase 1.2 report](docs/PHASE1.2-REPORT.md). Phase 2 implementation evidence is in [docs/PHASE2-REPORT.md](docs/PHASE2-REPORT.md), Phase 2.1 hardening evidence is in [docs/PHASE2.1-REPORT.md](docs/PHASE2.1-REPORT.md), and Phase 3 implementation evidence is in [docs/PHASE3-REPORT.md](docs/PHASE3-REPORT.md).
+Historical evidence: [Phase 0 closure](docs/PHASE0-CLOSURE.md), [Phase 1 report](docs/PHASE1-REPORT.md), [Phase 1.1 report](docs/PHASE1.1-REPORT.md), [Phase 1.2 report](docs/PHASE1.2-REPORT.md). Phase 2 implementation evidence is in [docs/PHASE2-REPORT.md](docs/PHASE2-REPORT.md), Phase 2.1 hardening evidence is in [docs/PHASE2.1-REPORT.md](docs/PHASE2.1-REPORT.md), Phase 3 implementation evidence is in [docs/PHASE3-REPORT.md](docs/PHASE3-REPORT.md), and the Phase 4 delivery state is recorded in [docs/PHASE4-REPORT.md](docs/PHASE4-REPORT.md).
 
-Current limits: synthetic single-incident dataset; no live telemetry or incident ingestion; temporal correlation does not infer causality; traversal depth is at most four and each path query returns at most 500 rows; local single-user setup. Phase 3 creates only a local follow-up ticket; it does not call Jira, PagerDuty, or ServiceNow and does not remediate services. There is no web UI, cloud deployment, production authentication, multi-user authorization, or distributed execution. Graph tools and MCP remain read-only; an Agent cannot authorize or execute an Action.
+Current limits: synthetic single-incident dataset; no live telemetry or incident ingestion; temporal correlation does not infer causality; traversal depth is at most four and each path query returns at most 500 rows; local single-user setup. Phase 3 creates only a local follow-up ticket; it does not call Jira, PagerDuty, or ServiceNow and does not remediate services. The Phase 4 Web Console is loopback-only and has no production authentication, multi-user authorization, public deployment, or distributed execution. Graph tools and MCP remain read-only; an Agent cannot authorize or execute an Action.

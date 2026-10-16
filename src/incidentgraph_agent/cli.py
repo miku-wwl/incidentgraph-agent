@@ -57,6 +57,16 @@ def _parser() -> argparse.ArgumentParser:
     mcp_commands = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_commands.add_parser("serve", help="serve trusted graph tools over stdio")
 
+    web = commands.add_parser("web", help="run the local browser console")
+    web_commands = web.add_subparsers(dest="web_command", required=True)
+    web_serve = web_commands.add_parser(
+        "serve", help="serve the local IncidentGraph console"
+    )
+    web_serve.add_argument(
+        "--home", required=True, help="already initialized private Action home"
+    )
+    web_serve.add_argument("--port", type=int, default=8765)
+
     action = commands.add_parser(
         "action", help="manage a separately gated local incident ticket action"
     )
@@ -95,6 +105,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "action":
             return _run_action_command(args)
+        if args.command == "web":
+            from incidentgraph_agent.web_console import WebConsoleError, serve
+
+            try:
+                serve(args.home, args.port)
+                return 0
+            except WebConsoleError as exc:
+                print(
+                    json.dumps({"error": {"code": exc.code, "message": str(exc)}}),
+                    file=sys.stderr,
+                )
+                return 2
+            except OSError:
+                print(
+                    "The local Web Console could not bind its loopback listener.",
+                    file=sys.stderr,
+                )
+                return 2
         if args.command == "mcp":
             from incidentgraph_agent.mcp_server import serve_stdio
 

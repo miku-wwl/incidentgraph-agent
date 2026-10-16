@@ -1,0 +1,208 @@
+{
+  "answer": "Incident(s): incident-payment-001. Potentially impacted service(s) (1): notification-service. Verified dependency path(s): notification-service -> checkout-api; notification-service -> checkout-api -> payment-service. Related deployment evidence: deploy-checkout-2026-10-12, deploy-payment-2026-10-15. Related alert evidence: alert-checkout-timeout-001, alert-payment-5xx-001. Causality remains unproven; deployment and alert timing is correlation only.",
+  "answer_source": "deterministic",
+  "causality": {
+    "note": "Graph relationships and event timing do not establish causality.",
+    "status": "unproven"
+  },
+  "evidence_complete": true,
+  "evidence_ids": [
+    "alert:alert-checkout-timeout-001",
+    "alert:alert-payment-5xx-001",
+    "deployment:deploy-checkout-2026-10-12",
+    "deployment:deploy-payment-2026-10-15",
+    "incident:incident-payment-001",
+    "path:notification-service>checkout-api",
+    "path:notification-service>checkout-api>payment-service",
+    "service:checkout-api",
+    "service:notification-service",
+    "service:payment-service"
+  ],
+  "evidence_refs": [
+    "alert:alert-checkout-timeout-001",
+    "alert:alert-payment-5xx-001",
+    "deployment:deploy-checkout-2026-10-12",
+    "deployment:deploy-payment-2026-10-15",
+    "incident:incident-payment-001",
+    "path:notification-service>checkout-api",
+    "path:notification-service>checkout-api>payment-service",
+    "service:checkout-api",
+    "service:notification-service",
+    "service:payment-service"
+  ],
+  "model": "phi4-mini:latest",
+  "model_answer_grounded": false,
+  "observations": [
+    {
+      "arguments": {
+        "incident_id": "incident-payment-001"
+      },
+      "evidence": {
+        "candidate_explanations": [
+          {
+            "causality_status": "unproven",
+            "kind": "deployment_and_following_alert_timeline",
+            "service_id": "payment-service",
+            "statement": "Deployment deploy-payment-2026-10-15 to payment-service preceded a related alert before the incident. This is a lead to investigate, not proof that the deployment caused the incident.",
+            "supporting_evidence_ids": [
+              "deploy-payment-2026-10-15",
+              "alert-payment-5xx-001"
+            ]
+          }
+        ],
+        "causality": {
+          "note": "Temporal proximity is correlation, not proof of causation.",
+          "status": "unproven"
+        },
+        "evidence_complete": true,
+        "evidence_refs": [
+          "alert:alert-checkout-timeout-001",
+          "alert:alert-payment-5xx-001",
+          "deployment:deploy-checkout-2026-10-12",
+          "deployment:deploy-payment-2026-10-15",
+          "incident:incident-payment-001",
+          "path:notification-service>checkout-api",
+          "path:notification-service>checkout-api>payment-service",
+          "service:checkout-api",
+          "service:notification-service",
+          "service:payment-service"
+        ],
+        "incident": {
+          "id": "incident-payment-001",
+          "involved_service_ids": [
+            "checkout-api",
+            "payment-service"
+          ],
+          "started_at": "2026-10-15T08:20:00+13:00",
+          "status": "investigating",
+          "summary": "Synthetic payment requests are failing after a recent payment-service deployment.",
+          "type": "incident"
+        },
+        "max_depth": 4,
+        "paths_truncated": false,
+        "potentially_impacted_count": 1,
+        "potentially_impacted_services": [
+          {
+            "evidence_paths": [
+              {
+                "depth": 1,
+                "evidence_id": "path:notification-service>checkout-api",
+                "incident_service_id": "checkout-api",
+                "service_ids": [
+                  "notification-service",
+                  "checkout-api"
+                ]
+              },
+              {
+                "depth": 2,
+                "evidence_id": "path:notification-service>checkout-api>payment-service",
+                "incident_service_id": "payment-service",
+                "service_ids": [
+                  "notification-service",
+                  "checkout-api",
+                  "payment-service"
+                ]
+              }
+            ],
+            "minimum_depth": 1,
+            "service_id": "notification-service"
+          }
+        ],
+        "related_alerts": [
+          {
+            "description": "Synthetic checkout requests timed out while calling payment-service.",
+            "evidence_id": "alert:alert-checkout-timeout-001",
+            "id": "alert-checkout-timeout-001",
+            "relative_timing": "within_24h_before_incident",
+            "service_id": "checkout-api",
+            "severity": "high",
+            "timestamp": "2026-10-15T08:19:00+13:00"
+          },
+          {
+            "description": "Synthetic elevated 5xx rate observed on payment-service.",
+            "evidence_id": "alert:alert-payment-5xx-001",
+            "id": "alert-payment-5xx-001",
+            "relative_timing": "within_24h_before_incident",
+            "service_id": "payment-service",
+            "severity": "critical",
+            "timestamp": "2026-10-15T08:17:00+13:00"
+          }
+        ],
+        "related_deployments": [
+          {
+            "deployed_at": "2026-10-15T07:55:00+13:00",
+            "evidence_id": "deployment:deploy-payment-2026-10-15",
+            "id": "deploy-payment-2026-10-15",
+            "relative_timing": "within_24h_before_incident",
+            "service_id": "payment-service",
+            "status": "succeeded",
+            "version": "2026.10.15.2"
+          },
+          {
+            "deployed_at": "2026-10-12T10:00:00+13:00",
+            "evidence_id": "deployment:deploy-checkout-2026-10-12",
+            "id": "deploy-checkout-2026-10-12",
+            "relative_timing": "older_than_24h_before_incident",
+            "service_id": "checkout-api",
+            "status": "succeeded",
+            "version": "2026.10.12.1"
+          }
+        ],
+        "relationship_direction": "A DEPENDS_ON B means A requires B; blast-radius paths are traversed against the edge direction.",
+        "uncertainty": [
+          "The synthetic graph contains no logs, traces, or metric time series.",
+          "Deployment and alert timing alone cannot establish root cause."
+        ]
+      },
+      "tool": "investigate_incident"
+    }
+  ],
+  "request": "Investigate incident-payment-001 and explain which services may be affected.",
+  "status": "complete",
+  "task_completed": true,
+  "task_contract": {
+    "fulfilled_count": 1,
+    "missing": [],
+    "reason": null,
+    "requirements": [
+      {
+        "required_evidence": [
+          "incident.id",
+          "potentially_impacted_services",
+          "related_alerts",
+          "related_deployments"
+        ],
+        "required_tool": "investigate_incident",
+        "target_id": "incident-payment-001",
+        "task_type": "incident_investigation"
+      }
+    ],
+    "supported": true
+  },
+  "tool_execution_count": 1,
+  "tool_trace": [
+    {
+      "arguments": {
+        "incident_id": "incident-payment-001"
+      },
+      "evidence_refs": [
+        "alert:alert-checkout-timeout-001",
+        "alert:alert-payment-5xx-001",
+        "deployment:deploy-checkout-2026-10-12",
+        "deployment:deploy-payment-2026-10-15",
+        "incident:incident-payment-001",
+        "path:notification-service>checkout-api",
+        "path:notification-service>checkout-api>payment-service",
+        "service:checkout-api",
+        "service:notification-service",
+        "service:payment-service"
+      ],
+      "status": "success",
+      "tool": "investigate_incident"
+    }
+  ],
+  "uncertainty": [
+    "evidence_complete covers graph query completeness and field validation only; it does not establish source freshness or ground truth.",
+    "Deployment and alert timing is correlation, not proof of cause."
+  ]
+}
