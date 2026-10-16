@@ -232,7 +232,19 @@ def _run_action_command(args: argparse.Namespace) -> int:
             with FalkorStore(settings) as store:
 
                 def confirm(challenge: str) -> str:
-                    return input(f"Type {challenge}: ")
+                    prefix = {
+                        "approve": "APPROVE",
+                        "reject": "REJECT",
+                        "authorize": "AUTHORIZE",
+                        "execute": "EXECUTE",
+                    }[args.action_command]
+                    try:
+                        return input(f"Type exactly:\n{prefix} {challenge}\n")
+                    except (EOFError, KeyboardInterrupt) as exc:
+                        raise ActionWorkflowError(
+                            "operator_confirmation_cancelled",
+                            "Confirmation was cancelled before the lifecycle operation was authorized.",
+                        ) from exc
 
                 if args.action_command in {"approve", "reject"}:
                     payload = decide_run(
@@ -267,12 +279,56 @@ def _run_action_command(args: argparse.Namespace) -> int:
     except (ActionWorkflowError, IncidentGraphError) as exc:
         _emit({"error": {"code": exc.code, "message": str(exc)}})
         return 2
-    except (EOFError, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        if args.action_command == "execute":
+            _emit(
+                {
+                    "error": {
+                        "code": "execution_interrupted",
+                        "message": (
+                            "Execution was interrupted; the effect may have occurred. "
+                            "Inspect the persisted Action status and ticket receipt "
+                            "before taking further action. Do not retry execution."
+                        ),
+                        "action_id": args.action_id,
+                        "action_home": str(home),
+                        "inspect_action": [
+                            "incidentgraph",
+                            "action",
+                            "status",
+                            args.action_id,
+                            "--home",
+                            str(home),
+                        ],
+                        "inspect_tickets": [
+                            "incidentgraph",
+                            "action",
+                            "tickets",
+                            "--home",
+                            str(home),
+                        ],
+                    }
+                }
+            )
+            return 2
         _emit(
             {
                 "error": {
-                    "code": "operator_confirmation_cancelled",
-                    "message": "The lifecycle step was cancelled.",
+                    "code": "action_operation_interrupted",
+                    "message": (
+                        "The action lifecycle operation was interrupted. "
+                        "Inspect its persisted state before continuing."
+                    ),
+                }
+            }
+        )
+        return 2
+    except EOFError:
+        _emit(
+            {
+                "error": {
+                    "code": "action_operation_failed",
+                    "message": "The local action operation failed closed.",
                 }
             }
         )

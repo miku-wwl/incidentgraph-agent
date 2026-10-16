@@ -486,7 +486,14 @@ class LocalIncidentTicketStore:
         finally:
             connection.close()
 
-        verified = self.find_effect(effect_key, payload_digest)
+        try:
+            verified = self.find_effect(effect_key, payload_digest)
+        except Exception as exc:
+            # The INSERT is already committed. Any failed readback is therefore
+            # uncertainty about a durable effect, regardless of the exception type.
+            raise StoreOutcomeUnknown(
+                "The ticket committed but its receipt could not be verified."
+            ) from exc
         if (
             verified is None
             or verified.ticket_id != ticket_id

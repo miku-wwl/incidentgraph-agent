@@ -401,6 +401,20 @@ class LocalIncidentTicketExecutor:
                 return outcome(Outcome.CONFIRMED_FAILURE, reason="INPUT_REJECTED")
             if context.expired():
                 return outcome(Outcome.UNKNOWN_OUTCOME)
+        except (EvidenceSnapshotError, IncidentGraphError, StoreIdentityMismatch):
+            # These checks finish before create_or_get can attempt a ticket effect.
+            return outcome(Outcome.CONFIRMED_FAILURE, reason="INPUT_REJECTED")
+        except EffectPayloadConflict:
+            return outcome(Outcome.CONFIRMED_FAILURE, reason="PAYLOAD_CONFLICT")
+        except (StoreOperationError, StoreOutcomeUnknown):
+            return outcome(Outcome.UNKNOWN_OUTCOME)
+        except Exception:
+            return outcome(Outcome.UNKNOWN_OUTCOME)
+
+        # From this call onward a ticket may have committed. The store converts
+        # post-commit readback failures to StoreOutcomeUnknown; only the store's
+        # explicit pre-commit identity/payload rejections remain confirmed failures.
+        try:
             receipt = self.tickets.create_or_get(
                 incident_id=arguments["incident_id"],
                 evidence_digest=arguments["evidence_digest"],
@@ -410,9 +424,8 @@ class LocalIncidentTicketExecutor:
             if context.expired():
                 return outcome(Outcome.UNKNOWN_OUTCOME)
             return outcome(Outcome.SUCCESS, receipt=receipt.receipt_id)
-        except (EvidenceSnapshotError, IncidentGraphError, StoreIdentityMismatch):
-            # All these checks occur before ticket insertion, so they prove no effect.
-            return outcome(Outcome.CONFIRMED_FAILURE, reason="INPUT_REJECTED")
+        except StoreIdentityMismatch:
+            return outcome(Outcome.CONFIRMED_FAILURE, reason="STORE_IDENTITY_MISMATCH")
         except EffectPayloadConflict:
             return outcome(Outcome.CONFIRMED_FAILURE, reason="PAYLOAD_CONFLICT")
         except (StoreOperationError, StoreOutcomeUnknown):

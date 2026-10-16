@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 import subprocess
 import sys
 from dataclasses import replace
@@ -9,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+import incidentgraph_agent.cli as cli
 from incidentgraph_agent.action_evidence import (
     build_snapshot_from_agent_result,
     snapshot_from_graph_evidence,
@@ -88,6 +90,19 @@ def _snapshot(repository):
 
 def _proposal(home, store, repository):
     return create_action_proposal(home, _snapshot(repository), graph_store=store)
+
+
+def _pending_action(home, store, repository):
+    proposal = _proposal(home, store, repository)
+    run_id = proposal["run"]["run_id"]
+    decide_run(
+        home,
+        run_id,
+        approve=True,
+        confirm=_confirm("APPROVE"),
+        graph_store=store,
+    )
+    return admit_run(home, run_id, graph_store=store)["action"]["action_id"]
 
 
 def _confirm(prefix):
@@ -381,21 +396,85 @@ def test_scope_rebinding_does_not_reuse_old_ticket_store(tmp_path):
             pass
 
 
-def test_exact_plan_confirmation_is_required_and_does_not_advance_run(
-    tmp_path, store, repository
+@pytest.mark.parametrize(
+    "bad_confirmation", ["missing_prefix", "wrong_digest", "empty"]
+)
+def test_invalid_plan_confirmation_does_not_advance_run(
+    tmp_path, store, repository, bad_confirmation
 ):
     home = _new_workspace(tmp_path)
     proposal = _proposal(home, store, repository)
+
+    def response(challenge):
+        if bad_confirmation == "missing_prefix":
+            return challenge
+        if bad_confirmation == "wrong_digest":
+            digest = "0" * 64 if challenge != "0" * 64 else "1" * 64
+            return f"APPROVE {digest}"
+        return ""
+
     with pytest.raises(ActionWorkflowError) as error:
         decide_run(
             home,
             proposal["run"]["run_id"],
             approve=True,
-            confirm=lambda _challenge: "APPROVE another-plan",
+            confirm=response,
             graph_store=store,
         )
     assert error.value.code == "operator_confirmation_failed"
     assert review_run(home, proposal["run"]["run_id"])["status"] == "AwaitingApproval"
+    assert list_tickets(home)["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "bad_confirmation", ["missing_prefix", "wrong_action_id", "empty"]
+)
+def test_invalid_authorization_confirmation_does_not_authorize_or_create_ticket(
+    tmp_path, store, repository, bad_confirmation
+):
+    home = _new_workspace(tmp_path)
+    action_id = _pending_action(home, store, repository)
+
+    def response(challenge):
+        if bad_confirmation == "missing_prefix":
+            return challenge
+        if bad_confirmation == "wrong_action_id":
+            return "AUTHORIZE another-action"
+        return ""
+
+    with pytest.raises(ActionWorkflowError) as error:
+        authorize_action(home, action_id, confirm=response, graph_store=store)
+    assert error.value.code == "operator_confirmation_failed"
+    assert action_status(home, action_id)["status"] == "Pending"
+    assert list_tickets(home)["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "bad_confirmation", ["missing_prefix", "wrong_action_id", "empty"]
+)
+def test_invalid_execution_confirmation_does_not_execute_or_create_ticket(
+    tmp_path, store, repository, bad_confirmation
+):
+    home = _new_workspace(tmp_path)
+    action_id = _pending_action(home, store, repository)
+    authorize_action(
+        home,
+        action_id,
+        confirm=_confirm("AUTHORIZE"),
+        graph_store=store,
+    )
+
+    def response(challenge):
+        if bad_confirmation == "missing_prefix":
+            return challenge
+        if bad_confirmation == "wrong_action_id":
+            return "EXECUTE another-action"
+        return ""
+
+    with pytest.raises(ActionWorkflowError) as error:
+        execute_action(home, action_id, confirm=response, graph_store=store)
+    assert error.value.code == "operator_confirmation_failed"
+    assert action_status(home, action_id)["status"] == "Authorized"
     assert list_tickets(home)["count"] == 0
 
 
@@ -511,6 +590,265 @@ def test_lost_ticket_commit_ack_is_unknown_and_never_retried(
             graph_store=store,
         )
     assert list_tickets(home)["count"] == 1
+
+
+@pytest.mark.parametrize(
+    "readback_error", [StoreIdentityMismatch, EffectPayloadConflict]
+)
+def test_post_commit_readback_rejection_is_unknown_and_never_replayed(
+    tmp_path, store, repository, monkeypatch, readback_error
+):
+    home = _new_workspace(tmp_path)
+    action_id = _pending_action(home, store, repository)
+    authorize_action(
+        home,
+        action_id,
+        confirm=_confirm("AUTHORIZE"),
+        graph_store=store,
+    )
+    original = LocalIncidentTicketStore.find_effect
+    calls = 0
+
+    def reject_post_commit_readback(self, effect_key, payload_digest):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise readback_error("injected post-commit readback rejection")
+        return original(self, effect_key, payload_digest)
+
+    monkeypatch.setattr(
+        LocalIncidentTicketStore, "find_effect", reject_post_commit_readback
+    )
+    result = execute_action(
+        home,
+        action_id,
+        confirm=_confirm("EXECUTE"),
+        graph_store=store,
+    )
+
+    assert calls >= 3
+    assert result["status"] == "Unknown"
+    assert result["effect_observed_without_runtime_receipt"] is True
+    assert list_tickets(home)["count"] == 1
+    persisted = action_status(home, action_id)
+    assert persisted["status"] == "Unknown"
+    assert persisted["effect_observed"] is True
+    with pytest.raises(ActionWorkflowError):
+        execute_action(
+            home,
+            action_id,
+            confirm=_confirm("EXECUTE"),
+            graph_store=store,
+        )
+    assert list_tickets(home)["count"] == 1
+
+
+@pytest.mark.parametrize(
+    "pre_effect_error", [StoreIdentityMismatch, EffectPayloadConflict]
+)
+def test_pre_effect_store_rejection_remains_confirmed_failure(
+    tmp_path, store, repository, monkeypatch, pre_effect_error
+):
+    home = _new_workspace(tmp_path)
+    action_id = _pending_action(home, store, repository)
+    authorize_action(
+        home,
+        action_id,
+        confirm=_confirm("AUTHORIZE"),
+        graph_store=store,
+    )
+
+    def reject_before_create(self, _effect_key, _payload_digest):
+        raise pre_effect_error("injected pre-effect validation rejection")
+
+    def unexpected_create(*_args, **_kwargs):
+        pytest.fail("ticket insertion must not run after pre-effect rejection")
+
+    monkeypatch.setattr(LocalIncidentTicketStore, "find_effect", reject_before_create)
+    monkeypatch.setattr(LocalIncidentTicketStore, "create_or_get", unexpected_create)
+    result = execute_action(
+        home,
+        action_id,
+        confirm=_confirm("EXECUTE"),
+        graph_store=store,
+    )
+    assert result["status"] == "Failed"
+    assert list_tickets(home)["count"] == 0
+
+
+def test_existing_pre_effect_payload_conflict_is_rejected_without_new_ticket(
+    tmp_path, store, repository
+):
+    home = _new_workspace(tmp_path)
+    action_id = _pending_action(home, store, repository)
+    authorize_action(
+        home,
+        action_id,
+        confirm=_confirm("AUTHORIZE"),
+        graph_store=store,
+    )
+    workspace = ActionWorkspace.load(home)
+    with open_action_runtime(home, graph_store=store) as (
+        runtime,
+        principal,
+        _snapshots,
+        _tickets,
+    ):
+        action = runtime.gateway.get(action_id, principal)
+    tickets = LocalIncidentTicketStore(
+        workspace.ticket_path, workspace.ticket_store_id, workspace.binding
+    )
+    existing = tickets.create_or_get(
+        incident_id=INCIDENT_ID,
+        evidence_digest="b" * 64,
+        payload_digest="c" * 64,
+        effect_key=action.effect_key,
+    )
+
+    result = execute_action(
+        home,
+        action_id,
+        confirm=_confirm("EXECUTE"),
+        graph_store=store,
+    )
+
+    assert result["status"] == "Failed"
+    persisted = list_tickets(home)
+    assert persisted["count"] == 1
+    assert persisted["tickets"][0]["ticket_id"] == existing.ticket_id
+    assert persisted["tickets"][0]["receipt_id"] == existing.receipt_id
+
+
+def test_shallow_snapshot_is_rejected_at_action_proposal_entrypoint(
+    tmp_path, store, repository
+):
+    home = _new_workspace(tmp_path)
+    shallow_evidence = repository.investigate(INCIDENT_ID, max_depth=1)
+    snapshot = snapshot_from_graph_evidence(
+        shallow_evidence,
+        incident_id=INCIDENT_ID,
+        graph_identity=store.settings.graph_name,
+    )
+    with pytest.raises(ActionWorkflowError) as error:
+        create_action_proposal(home, snapshot, graph_store=store)
+    assert error.value.code == "evidence_changed"
+    assert list_tickets(home)["count"] == 0
+
+
+def test_cli_reports_sigint_after_committed_effect_as_ambiguous(
+    tmp_path, store, repository, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli.Settings, "from_env", lambda: store.settings)
+    home = _new_workspace(tmp_path)
+    action_id = _pending_action(home, store, repository)
+    authorize_action(
+        home,
+        action_id,
+        confirm=_confirm("AUTHORIZE"),
+        graph_store=store,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: f"EXECUTE {action_id}")
+    original = LocalIncidentTicketStore.create_or_get
+
+    def commit_then_sigint(self, **kwargs):
+        receipt = original(self, **kwargs)
+        signal.raise_signal(signal.SIGINT)
+        return receipt
+
+    monkeypatch.setattr(LocalIncidentTicketStore, "create_or_get", commit_then_sigint)
+    exit_code = cli.main(["action", "execute", action_id, "--home", str(home)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert payload["error"]["code"] == "execution_interrupted"
+    assert payload["error"]["action_id"] == action_id
+    assert payload["error"]["action_home"] == str(home.resolve())
+    assert payload["error"]["inspect_action"] == [
+        "incidentgraph",
+        "action",
+        "status",
+        action_id,
+        "--home",
+        str(home.resolve()),
+    ]
+    assert payload["error"]["inspect_tickets"] == [
+        "incidentgraph",
+        "action",
+        "tickets",
+        "--home",
+        str(home.resolve()),
+    ]
+    assert "may have occurred" in payload["error"]["message"]
+    assert "Do not retry" in payload["error"]["message"]
+    assert action_status(home, action_id)["status"] == "Unknown"
+    assert action_status(home, action_id)["effect_observed"] is True
+    assert list_tickets(home)["count"] == 1
+    with pytest.raises(ActionWorkflowError):
+        execute_action(
+            home,
+            action_id,
+            confirm=_confirm("EXECUTE"),
+            graph_store=store,
+        )
+    assert list_tickets(home)["count"] == 1
+
+
+@pytest.mark.parametrize("cancellation", [EOFError, KeyboardInterrupt])
+def test_cli_execute_prompt_cancellation_never_dispatches(
+    tmp_path, store, repository, monkeypatch, capsys, cancellation
+):
+    monkeypatch.setattr(cli.Settings, "from_env", lambda: store.settings)
+    home = _new_workspace(tmp_path)
+    action_id = _pending_action(home, store, repository)
+    authorize_action(
+        home,
+        action_id,
+        confirm=_confirm("AUTHORIZE"),
+        graph_store=store,
+    )
+
+    def cancel_at_prompt(_prompt):
+        raise cancellation
+
+    monkeypatch.setattr("builtins.input", cancel_at_prompt)
+    exit_code = cli.main(["action", "execute", action_id, "--home", str(home)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert payload["error"]["code"] == "operator_confirmation_cancelled"
+    assert action_status(home, action_id)["status"] == "Authorized"
+    assert list_tickets(home)["count"] == 0
+
+
+def test_cli_execution_interrupt_before_dispatch_is_conservative(
+    tmp_path, store, repository, monkeypatch, capsys
+):
+    home = _new_workspace(tmp_path)
+    action_id = _pending_action(home, store, repository)
+    authorize_action(
+        home,
+        action_id,
+        confirm=_confirm("AUTHORIZE"),
+        graph_store=store,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: f"EXECUTE {action_id}")
+
+    def interrupt_before_dispatch(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "incidentgraph_agent.ticket_actions._validate_snapshot_current",
+        interrupt_before_dispatch,
+    )
+    exit_code = cli.main(["action", "execute", action_id, "--home", str(home)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert payload["error"]["code"] == "execution_interrupted"
+    assert payload["error"]["action_id"] == action_id
+    assert "may have occurred" in payload["error"]["message"]
+    assert action_status(home, action_id)["status"] == "Authorized"
+    assert list_tickets(home)["count"] == 0
 
 
 def test_concurrent_gateway_execution_creates_one_ticket(tmp_path, store, repository):
