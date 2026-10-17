@@ -69,3 +69,37 @@ One initial focused pytest invocation omitted `--env-file .env` and stopped duri
 - Existing synthetic-data, local-only, single-user, and non-remediation limits remain unchanged.
 
 At report preparation, Git was uncommitted and unpushed. The expected working-tree status contained the five modified files above plus this report.
+
+## Final async race fix (2026-10-17)
+
+**Finding: reproduced and fixed.** Before the fix, a controlled Node DOM/fetch harness started authorization for `action-A`, changed the selected Action to `action-B`, then completed the first job. The page still selected `action-B` but displayed `AUTHORIZED` and restored an `Execute Action` control for `action-A`. The equivalent Run test selected `run-B` but displayed `APPROVED` and restored the `Admit approved Run as Action` control for `run-A`.
+
+The cause was that `watchJob()` called lifecycle completion callbacks without checking whether the Run or Action that started the operation was still the current UI context. Existing lookup-generation checks protected read responses and Plan proposal state, but not approval, rejection, admission, authorization, or execution completion callbacks.
+
+The fix captures the generation and expected identity when an operation starts. Run operations also retain the Plan digest; Action operations retain the Action ID and expected state. `watchJob()` verifies that context immediately before applying a result. Stale results do not call lifecycle callbacks or restore controls. The frontend continues polling the already-submitted job; changing a selection does not cancel backend work. A stale completion writes a neutral notice to the toast and job status, identifies the original Run or Action, and directs the operator to persisted status and receipt. Poll errors, failed jobs, and `Unknown` results use conservative wording. No automatic retry was added. The POST body uses the captured Run/Action ID rather than rereading a possibly changed field.
+
+An executable Node harness uses the actual `app.js`, a minimal DOM, deferred job/status promises, and mocked HTTP responses. It covers nine scenarios: stale authorization, approval, rejection, admission, Plan proposal, and execution; the normal four-gate lifecycle; overlapping status requests; and stale `Unknown` or job-poll error outcomes. It asserts that stale controls remain cleared, the original identifier stays available in the notice, no duplicate request is submitted, and the normal sequence remains Approve → Admit → Authorize → Execute. The harness is invoked by `tests/test_frontend_async.py` and does not access the local Runtime or persistent demo stores.
+
+### Async-fix validation
+
+| Command | Result |
+| --- | --- |
+| Pre-fix reproduction: `node tests/frontend_async_race_harness.cjs --probe` | Confirmed stale `AUTHORIZED` + Execute control for Action A after selecting B, and stale `APPROVED` + Admit control for Run A after selecting B |
+| `node tests/frontend_async_race_harness.cjs` | PASS — all 9 asynchronous scenarios |
+| `uv run --locked --no-sync --env-file .env --python 3.13 pytest -q tests/test_frontend_async.py tests/test_web_console.py` | PASS — 10 passed |
+| `uv run --locked --no-sync --env-file .env --python 3.13 pytest -q` | PASS — 169 passed in 124.88s |
+| `uv sync --locked --python 3.13` | PASS — 47 packages resolved, 46 checked |
+| `uv run --locked --python 3.13 ruff check src/incidentgraph_agent tests` | PASS |
+| `uv run --locked --python 3.13 black --check tests/test_frontend_async.py` | PASS — unchanged |
+| `uv pip check --python .venv\Scripts\python.exe` | PASS — 46 packages compatible |
+| `node --check src/incidentgraph_agent/web/app.js` | PASS |
+| `node --check tests/frontend_async_race_harness.cjs` | PASS |
+| `git diff --check` | PASS |
+
+The simulated normal lifecycle kept approval, admission, authorization, and execution as separate operations with their existing exact phrases. No Runtime dependency, backend route, ticket effect, Runtime approval rule, evidence validation, Agent, MCP permission, or FalkorDB query changed.
+
+**Browser smoke: PARTIAL.** The existing local page opened and reported `FalkorDB connected`; the read-only Tickets & Audit view showed the pre-existing Action and ticket. No approval, admission, authorization, or execution request was submitted. The browser session exposed page state but no documented click/type control in this task session, so changing IDs and observing browser-native completion notifications was not run. Those async behaviors were exercised by the executable mocked DOM harness instead. No screenshot was fabricated or added.
+
+### Async-fix delivery state
+
+Baseline HEAD: `4a40f575e3a2bd70f4938f90cc3b1d5f50abd325` on `main`. At report preparation, the async fix was uncommitted and unpushed. The expected worktree changes at that time were this report, `src/incidentgraph_agent/web/app.js`, `tests/frontend_async_race_harness.cjs`, and `tests/test_frontend_async.py`. No historical submission evidence or private Runtime state was modified.

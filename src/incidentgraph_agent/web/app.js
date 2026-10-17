@@ -78,6 +78,79 @@ function clearActionContext(message, { clearIds = false } = {}) {
   }
 }
 
+function runOperationContext(runId, planDigest = state.currentReview?.plan_digest) {
+  return {
+    generation: state.actionLookupRequest,
+    kind: "run",
+    id: runId,
+    planDigest,
+  };
+}
+
+function actionOperationContext(actionId) {
+  return {
+    generation: state.actionLookupRequest,
+    kind: "action",
+    id: actionId,
+    status: state.currentActionStatus?.status,
+  };
+}
+
+function operationContextIsCurrent(context) {
+  if (!context) return true;
+  if (context.generation !== state.actionLookupRequest) return false;
+  if (context.kind === "proposal") return true;
+  if (context.kind === "run") {
+    return (
+      byId("run-id").value.trim() === context.id &&
+      state.currentReview?.run_id === context.id &&
+      state.currentReview?.plan_digest === context.planDigest
+    );
+  }
+  if (context.kind === "action") {
+    const selectedId =
+      byId("action-id").value.trim() || byId("audit-action-id").value.trim();
+    return (
+      selectedId === context.id &&
+      state.currentActionStatus?.action?.action_id === context.id &&
+      state.currentActionStatus?.status === context.status
+    );
+  }
+  return false;
+}
+
+function reportStaleOperation(context, operation, target, result = {}, uncertain = false) {
+  const isUncertain = uncertain || result.status === "Unknown";
+  const subject =
+    context.kind === "action"
+      ? `Action ${context.id}`
+      : context.kind === "run"
+        ? `Run ${context.id}`
+        : `Run ${result.run?.run_id || "from the previous proposal"}`;
+  const prefix =
+    context.kind === "proposal"
+      ? `A ${operation} operation for the previous selection`
+      : `The ${operation} operation for previously selected ${subject}`;
+  const outcome = isUncertain
+    ? "could not be confirmed; its outcome may be uncertain"
+    : "completed";
+  let guidance =
+    context.kind === "action"
+      ? `Inspect ${subject}'s persisted status and receipt.`
+      : `Inspect ${subject}'s persisted status.`;
+  if (
+    result.action?.action_id &&
+    (context.kind !== "action" || result.action.action_id !== context.id)
+  ) {
+    guidance += ` The operation also returned Action ${result.action.action_id}; inspect its persisted status and receipt.`;
+  }
+  if (operation === "Execution") guidance += " Do not retry this Action.";
+  const message = `${prefix} ${outcome}. Its result was not applied to the current view. ${guidance}`;
+  target.classList.remove("running");
+  target.textContent = message;
+  notify(message);
+}
+
 function addProperty(container, label, value) {
   const row = node("div", "property-row");
   row.append(node("span", "", label), node("span", "", value ?? "—"));
@@ -333,45 +406,74 @@ function renderInvestigation(result) {
   byId("propose-button").disabled = false;
 }
 
-async function watchJob(jobId, target, onComplete, operation) {
-  target.classList.add("running");
-  target.textContent = `${operation} is running. Keep this page open; an interrupted request may need status inspection.`;
+async function watchJob(jobId, target, onComplete, operation, context = null) {
+  if (operationContextIsCurrent(context)) {
+    target.classList.add("running");
+    target.textContent = `${operation} is running. Keep this page open; an interrupted request may need status inspection.`;
+  }
   while (true) {
     await delay(850);
     let job;
     try { job = await apiGet(`/api/jobs/${encodeURIComponent(jobId)}`); }
     catch (error) {
+      if (context && !operationContextIsCurrent(context)) {
+        reportStaleOperation(context, operation, target, {}, true);
+        return;
+      }
       target.classList.remove("running");
       if (operation === "Execution") {
-        target.textContent = `Execution acknowledgement is unavailable. Outcome may be ambiguous for Action ${byId("action-id").value}. Inspect its persisted status and receipt; do not retry.`;
+        const actionId = context?.kind === "action" ? context.id : byId("action-id").value;
+        target.textContent = `Execution acknowledgement is unavailable. Outcome may be ambiguous for Action ${actionId}. Inspect its persisted status and receipt; do not retry.`;
       } else target.textContent = error.message;
       return;
     }
     if (job.state === "queued" || job.state === "running") continue;
-    target.classList.remove("running");
     if (job.state === "failed") {
+      if (context && !operationContextIsCurrent(context)) {
+        reportStaleOperation(context, operation, target, {}, true);
+        return;
+      }
+      target.classList.remove("running");
       const text = `${job.error?.code || "failed"}: ${job.error?.message || "The local operation failed."}`;
-      target.textContent = operation === "Execution" ? `${text} If dispatch may have started, inspect the Action status and receipt; do not retry.` : text;
+      const actionId = context?.kind === "action" ? context.id : null;
+      target.textContent = operation === "Execution" ? `${text} If dispatch may have started for Action ${actionId || byId("action-id").value}, inspect its status and receipt; do not retry.` : text;
       return;
     }
+    const result = job.result || {};
+    if (context && !operationContextIsCurrent(context)) {
+      reportStaleOperation(context, operation, target, result);
+      return;
+    }
+    target.classList.remove("running");
     target.textContent = `${operation} finished. Inspect the result below before choosing another stage.`;
-    onComplete(job.result || {});
+    onComplete(result);
     return;
   }
 }
 
-async function startOperation(path, body, target, operation, onComplete) {
+async function startOperation(path, body, target, operation, onComplete, context = null) {
   if (state.writeBusy) return;
+  if (!operationContextIsCurrent(context)) {
+    notify("The selected Run or Action changed. Reload its persisted status before continuing.");
+    return;
+  }
   state.writeBusy = true;
   target.classList.remove("running");
   target.textContent = "Submitting one explicit local operation…";
   try {
     const response = await apiPost(path, body);
     if (response.duplicate) notify("Duplicate request returned its existing job; no second operation was queued.");
-    await watchJob(response.job.job_id, target, onComplete, operation);
+    await watchJob(response.job.job_id, target, onComplete, operation, context);
   } catch (error) {
+    if (context && !operationContextIsCurrent(context)) {
+      reportStaleOperation(context, operation, target, {}, true);
+      return;
+    }
     target.textContent = error.message;
-    if (operation === "Execution") notify("Execution acknowledgement failed; inspect persisted Action state and receipt. Do not retry blindly.");
+    if (operation === "Execution") {
+      const actionId = context?.kind === "action" ? context.id : byId("action-id").value;
+      notify(`Execution acknowledgement failed for Action ${actionId}; inspect persisted Action state and receipt. Do not retry blindly.`);
+    }
     if (operation === "Plan proposal") byId("propose-button").disabled = false;
   } finally {
     state.writeBusy = false;
@@ -446,8 +548,8 @@ function renderActionControls() {
   if (status === "AwaitingApproval" && review) {
     const box = confirmationBox("APPROVE PLAN", `APPROVE ${review.plan_digest}`, "Approve Plan", async (value) => {
       if (value !== `APPROVE ${review.plan_digest}`) return notify("The phrase must exactly match the reviewed Plan digest.");
-      const id = byId("run-id").value.trim();
-      await startOperation("/api/actions/decision", { run_id: id, decision: "approve", confirmation: value }, byId("action-job"), "Plan approval", (result) => { state.currentReview = { ...review, status: result.status }; byId("action-state").textContent = String(result.status || "").toUpperCase(); byId("action-state").className = "state-chip success"; renderActionControls(); });
+      const context = runOperationContext(review.run_id, review.plan_digest);
+      await startOperation("/api/actions/decision", { run_id: review.run_id, decision: "approve", confirmation: value }, byId("action-job"), "Plan approval", (result) => { state.currentReview = { ...review, status: result.status }; byId("action-state").textContent = String(result.status || "").toUpperCase(); byId("action-state").className = "state-chip success"; renderActionControls(); }, context);
     });
     root.append(box);
     const reject = node("button", "button danger", "Reject Plan");
@@ -455,7 +557,8 @@ function renderActionControls() {
     reject.addEventListener("click", () => {
       const input = root.querySelector("input");
       if (input.value !== `REJECT ${review.plan_digest}`) return notify(`Type exactly: REJECT ${review.plan_digest}`);
-      startOperation("/api/actions/decision", { run_id: byId("run-id").value.trim(), decision: "reject", confirmation: input.value }, byId("action-job"), "Plan rejection", (result) => { state.currentReview = { ...review, status: result.status }; byId("action-state").textContent = String(result.status || "").toUpperCase(); renderActionControls(); });
+      const context = runOperationContext(review.run_id, review.plan_digest);
+      startOperation("/api/actions/decision", { run_id: review.run_id, decision: "reject", confirmation: input.value }, byId("action-job"), "Plan rejection", (result) => { state.currentReview = { ...review, status: result.status }; byId("action-state").textContent = String(result.status || "").toUpperCase(); renderActionControls(); }, context);
       input.value = "";
     });
     root.append(reject);
@@ -466,13 +569,13 @@ function renderActionControls() {
   if (status === "Approved" && review) {
     const button = node("button", "button primary", "Admit approved Run as Action");
     button.type = "button";
-    button.addEventListener("click", () => startOperation("/api/actions/admit", { run_id: byId("run-id").value.trim() }, byId("action-job"), "Admission", (result) => {
+    button.addEventListener("click", () => startOperation("/api/actions/admit", { run_id: review.run_id }, byId("action-job"), "Admission", (result) => {
       if (result.action?.action_id) { byId("action-id").value = result.action.action_id; byId("audit-action-id").value = result.action.action_id; }
       byId("action-state").textContent = String(result.status || "").toUpperCase();
       state.currentReview = null;
       state.currentActionStatus = { status: result.status, action: result.action };
       renderActionControls();
-    }));
+    }, runOperationContext(review.run_id, review.plan_digest)));
     root.append(button);
     return;
   }
@@ -481,7 +584,7 @@ function renderActionControls() {
   if (status === "Pending" && actionId) {
     root.append(confirmationBox("SEPARATE EXECUTION AUTHORIZATION", `AUTHORIZE ${actionId}`, "Authorize Action", async (value) => {
       if (value !== `AUTHORIZE ${actionId}`) return notify("The phrase must exactly match this Action ID.");
-      await startOperation("/api/actions/authorize", { action_id: actionId, confirmation: value }, byId("action-job"), "Authorization", (result) => { byId("action-state").textContent = String(result.status || "").toUpperCase(); state.currentActionStatus = { ...current, status: result.status, action: result.action }; renderActionControls(); });
+      await startOperation("/api/actions/authorize", { action_id: actionId, confirmation: value }, byId("action-job"), "Authorization", (result) => { byId("action-state").textContent = String(result.status || "").toUpperCase(); state.currentActionStatus = { ...current, status: result.status, action: result.action }; renderActionControls(); }, actionOperationContext(actionId));
     }));
     return;
   }
@@ -493,7 +596,7 @@ function renderActionControls() {
         state.currentActionStatus = { status: result.status, action: result.action };
         renderActionControls();
         if (result.status === "Unknown") byId("unknown-banner").classList.remove("hidden");
-      });
+      }, actionOperationContext(actionId));
     }));
   }
 }
@@ -616,6 +719,7 @@ async function runInvestigation() {
 async function proposeAction() {
   if (!state.currentInvestigation?.investigation_id) return notify("A complete trusted investigation is required.");
   const request = ++state.actionLookupRequest;
+  const context = { generation: request, kind: "proposal" };
   byId("propose-button").disabled = true;
   clearActionContext("Preparing a new Plan. Load its Run ID to inspect the complete Plan and evidence.", { clearIds: true });
   showView("actions");
@@ -626,7 +730,7 @@ async function proposeAction() {
     byId("action-state").className = "state-chip warning";
     byId("action-state").textContent = String(result.status || "AWAITING_APPROVAL").toUpperCase();
     byId("action-review").replaceChildren(node("div", "success-state", `Run ${runId || "created"} is awaiting human review. Select Review to inspect the full Plan and evidence.`));
-  });
+  }, context);
 }
 
 document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
