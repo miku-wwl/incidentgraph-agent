@@ -10,6 +10,7 @@ const state = {
   highlightedEdges: new Set(),
   toastTimer: null,
   writeBusy: false,
+  actionLookupRequest: 0,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -51,11 +52,30 @@ function notify(message) {
 
 function showView(name) {
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
-  document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === name));
+  document.querySelectorAll(".nav-item").forEach((button) => {
+    const selected = button.dataset.view === name;
+    button.classList.toggle("active", selected);
+    if (selected) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
 }
 
 function showError(container, message) {
   container.replaceChildren(node("div", "error-state", message));
+}
+
+function clearActionContext(message, { clearIds = false } = {}) {
+  state.currentReview = null;
+  state.currentActionStatus = null;
+  byId("action-controls").replaceChildren();
+  byId("action-state").className = "state-chip neutral";
+  byId("action-state").textContent = "NO RECORD LOADED";
+  byId("action-review").replaceChildren(node("div", "empty-state", message));
+  byId("unknown-banner").classList.add("hidden");
+  if (clearIds) {
+    byId("run-id").value = "";
+    byId("action-id").value = "";
+  }
 }
 
 function addProperty(container, label, value) {
@@ -67,11 +87,15 @@ function addProperty(container, label, value) {
 async function loadHealth() {
   try {
     const health = await apiGet("/api/health");
-    byId("system-status").textContent = `FalkorDB ${health.graph.graph_module_version} · ${health.graph.redis_ping}`;
+    const status = byId("system-status");
+    const connected = health.status === "ready" && health.graph.redis_ping === "PONG";
+    status.textContent = connected ? "FalkorDB connected" : "FalkorDB unavailable";
+    status.className = `system-status ${connected ? "connected" : "unavailable"}`;
     byId("model-name").textContent = health.model;
   } catch (error) {
-    byId("system-status").textContent = error.message;
-    byId("system-status").classList.add("error-state");
+    const status = byId("system-status");
+    status.textContent = `FalkorDB unavailable · ${error.message}`;
+    status.className = "system-status unavailable";
   }
 }
 
@@ -361,8 +385,10 @@ function showReview(review) {
   byId("action-state").textContent = review.status.toUpperCase();
   const root = byId("action-review");
   root.replaceChildren();
+  const snapshotFreshness = review.snapshot_fresh === true ? "FRESH" : review.snapshot_fresh === false ? "STALE" : "UNKNOWN";
+  const snapshotAge = Number.isFinite(review.snapshot_age_seconds) ? `${review.snapshot_age_seconds}s` : "age unavailable";
   const facts = node("div", "review-grid");
-  [["RUN ID", review.run_id], ["INCIDENT", review.incident_id], ["PLAN DIGEST", review.plan_digest], ["EXACT TARGET", review.target], ["EVIDENCE DIGEST", review.evidence_digest], ["RISK", review.risk_class], ["SNAPSHOT", `${review.snapshot_fresh ? "FRESH" : "STALE"} · ${review.snapshot_age_seconds}s`], ["CAUSALITY", review.causality_status || "unproven"]].forEach(([label, value]) => {
+  [["RUN ID", review.run_id], ["INCIDENT", review.incident_id], ["PLAN DIGEST", review.plan_digest], ["EXACT TARGET", review.target], ["EVIDENCE DIGEST", review.evidence_digest], ["RISK", review.risk_class], ["SNAPSHOT", `${snapshotFreshness} · ${snapshotAge}`], ["CAUSALITY", review.causality_status || "unproven"]].forEach(([label, value]) => {
     const card = node("div", "review-card");
     card.append(node("span", "", label), node("b", "", value ?? "—"));
     facts.append(card);
@@ -418,7 +444,7 @@ function renderActionControls() {
   }
   if (status === "Succeeded" || status === "Failed" || status === "Rejected") return;
   if (status === "AwaitingApproval" && review) {
-    const box = confirmationBox("APPROVE PLAN", `APPROVE ${review.plan_digest}`, async (value) => {
+    const box = confirmationBox("APPROVE PLAN", `APPROVE ${review.plan_digest}`, "Approve Plan", async (value) => {
       if (value !== `APPROVE ${review.plan_digest}`) return notify("The phrase must exactly match the reviewed Plan digest.");
       const id = byId("run-id").value.trim();
       await startOperation("/api/actions/decision", { run_id: id, decision: "approve", confirmation: value }, byId("action-job"), "Plan approval", (result) => { state.currentReview = { ...review, status: result.status }; byId("action-state").textContent = String(result.status || "").toUpperCase(); byId("action-state").className = "state-chip success"; renderActionControls(); });
@@ -453,14 +479,14 @@ function renderActionControls() {
   const current = state.currentActionStatus;
   const actionId = current?.action?.action_id || byId("action-id").value.trim();
   if (status === "Pending" && actionId) {
-    root.append(confirmationBox("SEPARATE EXECUTION AUTHORIZATION", `AUTHORIZE ${actionId}`, async (value) => {
+    root.append(confirmationBox("SEPARATE EXECUTION AUTHORIZATION", `AUTHORIZE ${actionId}`, "Authorize Action", async (value) => {
       if (value !== `AUTHORIZE ${actionId}`) return notify("The phrase must exactly match this Action ID.");
       await startOperation("/api/actions/authorize", { action_id: actionId, confirmation: value }, byId("action-job"), "Authorization", (result) => { byId("action-state").textContent = String(result.status || "").toUpperCase(); state.currentActionStatus = { ...current, status: result.status, action: result.action }; renderActionControls(); });
     }));
     return;
   }
   if (status === "Authorized" && actionId) {
-    root.append(confirmationBox("SEPARATE EXECUTION CONFIRMATION", `EXECUTE ${actionId}`, async (value) => {
+    root.append(confirmationBox("SEPARATE EXECUTION CONFIRMATION", `EXECUTE ${actionId}`, "Execute Action", async (value) => {
       if (value !== `EXECUTE ${actionId}`) return notify("The phrase must exactly match this Action ID.");
       await startOperation("/api/actions/execute", { action_id: actionId, confirmation: value }, byId("action-job"), "Execution", (result) => {
         byId("action-state").textContent = String(result.status || "").toUpperCase();
@@ -472,7 +498,7 @@ function renderActionControls() {
   }
 }
 
-function confirmationBox(title, phraseText, onConfirm) {
+function confirmationBox(title, phraseText, buttonLabel, onConfirm) {
   const box = node("div", "confirmation-box");
   box.append(node("div", "eyebrow", title));
   box.append(node("span", "phrase", phraseText));
@@ -484,7 +510,7 @@ function confirmationBox(title, phraseText, onConfirm) {
   input.placeholder = "Manual confirmation required";
   box.append(input);
   const actions = node("div", "confirmation-actions");
-  const confirm = node("button", "button primary", title.includes("APPROVE") ? "Approve Plan" : title.includes("AUTHORIZE") ? "Authorize Action" : "Execute Action");
+  const confirm = node("button", "button primary", buttonLabel);
   confirm.type = "button";
   confirm.addEventListener("click", () => {
     const value = input.value;
@@ -499,20 +525,35 @@ function confirmationBox(title, phraseText, onConfirm) {
 async function loadReview() {
   const id = byId("run-id").value.trim();
   if (!id) return notify("Enter a Run ID first.");
-  byId("action-review").replaceChildren(node("div", "empty-state", "Loading the exact Runtime Plan and snapshot…"));
-  try { showReview(await apiGet(`/api/review?run_id=${encodeURIComponent(id)}`)); }
-  catch (error) { showError(byId("action-review"), error.message); }
+  const request = ++state.actionLookupRequest;
+  clearActionContext("Loading the exact Runtime Plan and snapshot…");
+  try {
+    const review = await apiGet(`/api/review?run_id=${encodeURIComponent(id)}`);
+    if (request !== state.actionLookupRequest || byId("run-id").value.trim() !== id) return;
+    showReview(review);
+  } catch (error) {
+    if (request === state.actionLookupRequest && byId("run-id").value.trim() === id) showError(byId("action-review"), error.message);
+  }
 }
 
 async function loadActionStatus() {
   const id = byId("action-id").value.trim() || byId("audit-action-id").value.trim();
   if (!id) return notify("Enter an Action ID first.");
-  byId("action-review").replaceChildren(node("div", "empty-state", "Reading durable Runtime state and receipt…"));
+  const request = ++state.actionLookupRequest;
+  clearActionContext("Reading durable Runtime state and receipt…");
   try {
     const result = await apiGet(`/api/status?action_id=${encodeURIComponent(id)}`);
+    const currentId = byId("action-id").value.trim() || byId("audit-action-id").value.trim();
+    if (request !== state.actionLookupRequest || currentId !== id) return;
     showActionStatus(result);
     showAuditStatus(result);
-  } catch (error) { showError(byId("action-review"), error.message); showError(byId("audit-action-result"), error.message); }
+  } catch (error) {
+    const currentId = byId("action-id").value.trim() || byId("audit-action-id").value.trim();
+    if (request === state.actionLookupRequest && currentId === id) {
+      showError(byId("action-review"), error.message);
+      showError(byId("audit-action-result"), error.message);
+    }
+  }
 }
 
 function showAuditStatus(payload) {
@@ -574,9 +615,12 @@ async function runInvestigation() {
 
 async function proposeAction() {
   if (!state.currentInvestigation?.investigation_id) return notify("A complete trusted investigation is required.");
+  const request = ++state.actionLookupRequest;
   byId("propose-button").disabled = true;
+  clearActionContext("Preparing a new Plan. Load its Run ID to inspect the complete Plan and evidence.", { clearIds: true });
   showView("actions");
   await startOperation("/api/actions/propose", { investigation_id: state.currentInvestigation.investigation_id }, byId("action-job"), "Plan proposal", (result) => {
+    if (request !== state.actionLookupRequest) return;
     const runId = result.run?.run_id;
     if (runId) byId("run-id").value = runId;
     byId("action-state").className = "state-chip warning";
@@ -596,6 +640,14 @@ byId("review-button").addEventListener("click", loadReview);
 byId("status-button").addEventListener("click", loadActionStatus);
 byId("audit-status-button").addEventListener("click", loadActionStatus);
 byId("refresh-tickets").addEventListener("click", loadTickets);
+byId("run-id").addEventListener("input", () => {
+  state.actionLookupRequest += 1;
+  clearActionContext("Run ID changed. Load that Run to review its exact Plan.");
+});
+["action-id", "audit-action-id"].forEach((id) => byId(id).addEventListener("input", () => {
+  state.actionLookupRequest += 1;
+  clearActionContext("Action ID changed. Inspect that Action to review its persisted state and receipt.");
+}));
 
 loadHealth();
 loadCatalog();

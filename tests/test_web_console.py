@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -438,3 +439,79 @@ def test_one_web_process_locks_its_action_home(console):
     with pytest.raises(WebConsoleError) as error:
         create_server(console["home"], 0)
     assert error.value.code == "action_home_in_use"
+
+
+def test_frontend_uses_product_brand_and_explicit_confirmation_labels(console):
+    client = console["client"]
+    page = client.get("/").text
+    script = client.get("/app.js").text
+    web_dir = Path(ticket_actions.__file__).with_name("web")
+    stylesheet = (web_dir / "style.css").read_text(encoding="utf-8")
+
+    assert "IncidentGraph Agent</strong>" in page
+    assert "CONNECTED INCIDENT INTELLIGENCE" in page
+    assert "Local console · synthetic incident data" in page
+    assert "PHASE 4 · DEMO" not in page
+    assert "phase-tag" not in stylesheet
+    product_assets = f"{page}\n{script}\n{stylesheet}".casefold()
+    for marker in (
+        "phase 0",
+        "phase 1",
+        "phase 2",
+        "phase 3",
+        "phase 4",
+        "prototype",
+        "development build",
+        "work in progress",
+        "internal preview",
+        "test version",
+        "temporary implementation",
+        "graph hacks",
+    ):
+        assert marker not in product_assets
+
+    approval = 'confirmationBox("APPROVE PLAN", `APPROVE ${review.plan_digest}`, "Approve Plan"'
+    authorization = 'confirmationBox("SEPARATE EXECUTION AUTHORIZATION", `AUTHORIZE ${actionId}`, "Authorize Action"'
+    execution = 'confirmationBox("SEPARATE EXECUTION CONFIRMATION", `EXECUTE ${actionId}`, "Execute Action"'
+    assert approval in script
+    assert authorization in script
+    assert execution in script
+    assert (
+        "function confirmationBox(title, phraseText, buttonLabel, onConfirm)" in script
+    )
+
+    authorization_flow = script.split(authorization, 1)[1].split(
+        'if (status === "Authorized"', 1
+    )[0]
+    execution_flow = script.split(execution, 1)[1].split("function confirmationBox", 1)[
+        0
+    ]
+    assert 'startOperation("/api/actions/authorize"' in authorization_flow
+    assert 'startOperation("/api/actions/execute"' in execution_flow
+    assert "value !== `AUTHORIZE ${actionId}`" in authorization_flow
+    assert "value !== `EXECUTE ${actionId}`" in execution_flow
+    assert "Number.isFinite(review.snapshot_age_seconds)" in script
+    assert '"age unavailable"' in script
+
+
+def test_frontend_clears_action_controls_when_identity_changes_or_new_data_loads(
+    console,
+):
+    script = console["client"].get("/app.js").text
+    clear_context = script.split("function clearActionContext", 1)[1].split("\n}", 1)[0]
+
+    assert "state.currentReview = null" in clear_context
+    assert "state.currentActionStatus = null" in clear_context
+    assert 'byId("action-controls").replaceChildren()' in clear_context
+    assert 'byId("unknown-banner").classList.add("hidden")' in clear_context
+    assert (
+        'clearActionContext("Loading the exact Runtime Plan and snapshot…")' in script
+    )
+    assert 'clearActionContext("Reading durable Runtime state and receipt…")' in script
+    assert 'clearActionContext("Preparing a new Plan.' in script
+    assert 'byId("run-id").addEventListener("input"' in script
+    assert (
+        '["action-id", "audit-action-id"].forEach((id) => byId(id).addEventListener("input"'
+        in script
+    )
+    assert "if (request !== state.actionLookupRequest" in script

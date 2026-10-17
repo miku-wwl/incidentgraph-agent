@@ -92,7 +92,7 @@ The [final human-approved demonstration](docs/demo/FINAL-DEMO-REPORT.md), comple
 
 Final screenshots: [complete investigation](docs/demo/screenshots/final-investigation.png), [human-approved Plan](docs/demo/screenshots/final-approved-plan.png), and [persisted ticket and verified receipt](docs/demo/screenshots/final-ticket-audit.png). The chronological video uses real embedded-browser captures with local English TTS and captions. The owner entered confirmations between captured takes; the video shows persisted states and does not claim continuous footage of typing. Source frames are 964×463, upscaled to a 1920×1080 export.
 
-Known presentation defect: the separate authorization section labels its button “Execute Action”; that callback performs authorization only, and execution still requires a distinct exact `EXECUTE` confirmation. This was disclosed before the owner's decision and remains unfixed in this documentation-only delivery.
+The [frontend polish report](docs/FRONTEND-POLISH-REPORT.md) records the current console's visual review, action-control fixes, and responsive verification limits.
 
 The initial Phase 4 walkthrough stopped before approval and remains historical evidence: [Graph Explorer](docs/demo/screenshots/01-graph-explorer.png), [real Ollama investigation](docs/demo/screenshots/02-real-ollama-investigation.png), [Plan awaiting approval](docs/demo/screenshots/03-action-review-awaiting-approval.png), and [original structured evidence](docs/demo/evidence/README.md).
 

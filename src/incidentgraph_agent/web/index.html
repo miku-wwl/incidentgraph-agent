@@ -12,20 +12,19 @@
     <header class="topbar">
       <a class="brand" href="/" aria-label="IncidentGraph Agent home">
         <span class="brand-mark" aria-hidden="true">IG</span>
-        <span><strong>IncidentGraph</strong><small>AGENT CONSOLE</small></span>
+        <span><strong>IncidentGraph Agent</strong><small>CONNECTED INCIDENT INTELLIGENCE</small></span>
       </a>
       <div class="topbar-center">
-        <span class="local-indicator"><i></i> LOCAL ENVIRONMENT</span>
-        <span id="system-status" class="system-status">Connecting to FalkorDB…</span>
+        <span class="local-indicator">LOCAL · LOOPBACK</span>
+        <span id="system-status" class="system-status checking" role="status" aria-live="polite">Checking FalkorDB…</span>
       </div>
-      <div class="topbar-right"><span class="phase-tag">PHASE 4 · DEMO</span></div>
     </header>
 
     <div class="layout">
       <aside class="sidebar">
         <div class="workspace-label">INCIDENT WORKSPACE</div>
         <nav class="nav-list" aria-label="Main navigation">
-          <button class="nav-item active" data-view="graph"><span class="nav-icon">◇</span>Graph explorer</button>
+          <button class="nav-item active" data-view="graph" aria-current="page"><span class="nav-icon">◇</span>Graph explorer</button>
           <button class="nav-item" data-view="investigation"><span class="nav-icon">⌕</span>AI investigation</button>
           <button class="nav-item" data-view="actions"><span class="nav-icon">▣</span>Action approval</button>
           <button class="nav-item" data-view="tickets"><span class="nav-icon">≡</span>Tickets &amp; audit</button>
@@ -121,7 +120,7 @@
           <div class="unknown-banner hidden" id="unknown-banner"><div class="unknown-mark">?</div><div><b>Outcome uncertain</b><p>Inspect the persisted Action state and receipt. Unknown is terminal; do not retry execution automatically.</p></div></div>
         </section>
 
-        <footer class="page-footer"><span>IncidentGraph Agent · Graph Hacks 2026</span><span>Local demonstration · synthetic incident data</span></footer>
+        <footer class="page-footer"><span>IncidentGraph Agent</span><span>Local console · synthetic incident data</span></footer>
       </main>
     </div>
   </div>
